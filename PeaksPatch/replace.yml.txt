@@ -1,0 +1,2 @@
+gcc_install: C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\13.3 rel1
+llvm_install: C:\Renesas\e2_studio\toolchains\llvm_arm\LLVMEmbeddedToolchainForArm-17.0.1-Windows-x86_64\
