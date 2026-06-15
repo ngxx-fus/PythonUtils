@@ -9,6 +9,9 @@ from datetime import datetime
 CONFIG_FILE = "stasher_config.json"
 DEFAULT_STORAGE = r"C:\Users\phu.nguyen-thanh\Documents\UserData"
 
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         default_config = {"PATH_STORAGE": DEFAULT_STORAGE}
@@ -53,11 +56,13 @@ class FileStasher:
         return None
 
     def print_summary(self):
+        clear_screen()
         print("\n" + "="*50)
         print(f"Storage path: {self.storage_path}")
         print(f"Number of record(s): {len(self.records)}")
 
     def new_record(self):
+        clear_screen()
         print("\n--- New record ---")
         name = input("    Name: ").strip()
         
@@ -187,6 +192,7 @@ class FileStasher:
         print(f"\n[SUCCESS] Record '{name}' stashed successfully!")
 
     def list_records(self):
+        clear_screen()
         print("\n--- Record List ---")
         if not self.records:
             print("  No records found.")
