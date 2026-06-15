@@ -4,14 +4,15 @@ import json
 import yaml
 import shutil
 import subprocess
+import threading
 from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QMenu,
     QTreeWidgetItem, QMessageBox, QDialog, QHeaderView,
-    QTextEdit
+    QTextEdit, QProgressDialog, QLabel
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QAction
 
 # Import UI classes compiled from the respective .ui files
@@ -38,12 +39,156 @@ def load_config():
             return {"PATH_STORAGE": DEFAULT_STORAGE}
 
 
+# ---------------- WORKER THREAD ----------------
+class BackupWorker(QThread):
+    progress = Signal(int, str)
+    finished = Signal(bool, str)
+    ask_error = Signal(str, str)
+
+    def __init__(self, root_path, storage_path, relative_list, record_name, record_desc):
+        super().__init__()
+        self.root_path = root_path
+        self.storage_path = storage_path
+        self.relative_list = relative_list
+        self.record_name = record_name
+        self.record_desc = record_desc
+        self._is_cancelled = False
+        self.sync_event = threading.Event()
+        self.error_action = None
+        self.skip_all_errors = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def set_error_action(self, action):
+        self.error_action = action
+        self.sync_event.set()
+
+    def run(self):
+        try:
+            folder_name = f"Record_{datetime.now().strftime('%Y_%B_%d_%H%M%S')}"
+            record_path = os.path.join(self.storage_path, folder_name)
+            os.makedirs(record_path, exist_ok=True)
+            
+            self.progress.emit(0, "Calculating files...")
+            total_files = 0
+            for rel in self.relative_list:
+                src = os.path.join(self.root_path, rel)
+                if rel.endswith('/') or os.path.isdir(src):
+                    for dirpath, _, filenames in os.walk(src):
+                        total_files += len(filenames)
+                else:
+                    total_files += 1
+
+            if total_files == 0:
+                total_files = 1
+                
+            copied_files = 0
+
+            def safe_copy(src_file, dst_file):
+                while True:
+                    if self._is_cancelled:
+                        raise Exception("Backup cancelled by user.")
+                    try:
+                        os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                        shutil.copy2(src_file, dst_file)
+                        nonlocal copied_files
+                        copied_files += 1
+                        percent = int((copied_files / total_files) * 100)
+                        percent = min(percent, 99)
+                        self.progress.emit(percent, f"Copying: {os.path.basename(src_file)}")
+                        break
+                    except Exception as e:
+                        if self.skip_all_errors:
+                            break
+                        self.sync_event.clear()
+                        self.ask_error.emit(src_file, str(e))
+                        self.sync_event.wait()
+                        if self.error_action == "Abort":
+                            raise Exception(f"Aborted by user due to error: {e}")
+                        elif self.error_action == "Skip":
+                            break
+                        elif self.error_action == "SkipAll":
+                            self.skip_all_errors = True
+                            break
+
+            for rel in self.relative_list:
+                if self._is_cancelled:
+                    raise Exception("Backup cancelled by user.")
+                src = os.path.join(self.root_path, rel)
+                dest = os.path.join(record_path, rel)
+                try:
+                    if rel.endswith('/') or os.path.isdir(src):
+                        shutil.copytree(src, dest, copy_function=safe_copy, dirs_exist_ok=True)
+                    else:
+                        safe_copy(src, dest)
+                except Exception as e:
+                    if "Aborted by user" in str(e):
+                        raise Exception("Backup cancelled by user.")
+                    if not self.skip_all_errors:
+                        self.sync_event.clear()
+                        self.ask_error.emit(src, str(e))
+                        self.sync_event.wait()
+                        if self.error_action == "Abort":
+                            raise Exception(f"Aborted by user due to error: {e}")
+                        elif self.error_action == "SkipAll":
+                            self.skip_all_errors = True
+
+            if self._is_cancelled:
+                raise Exception("Backup cancelled by user.")
+
+            self.progress.emit(100, "Saving metadata...")
+            
+            record_data = {
+                "GeneralInfo": [
+                    {"Name": self.record_name},
+                    {"Desc": self.record_desc},
+                    {"FolderName": folder_name},
+                    {"StoragePath": self.storage_path},
+                    {"Path2Record": os.path.join("${StoragePath}", folder_name)},
+                    {"RootPath": self.root_path},
+                    {"RelativePathList": self.relative_list}
+                ]
+            }
+
+            yml_file = os.path.join(record_path, "RecordStructure.yml")
+            with open(yml_file, 'w', encoding='utf-8') as f:
+                yaml.dump(record_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+            self.finished.emit(True, f"Record '{self.record_name}' has been successfully archived!")
+        except Exception as e:
+            # Clean up partial backup directory if canceled
+            if self._is_cancelled and os.path.exists(record_path):
+                try:
+                    shutil.rmtree(record_path)
+                except Exception:
+                    pass
+            self.finished.emit(False, str(e))
+
+
+# ---------------- DELETE WORKER THREAD ----------------
+class DeleteWorker(QThread):
+    finished = Signal(bool, str)
+
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+
+    def run(self):
+        try:
+            shutil.rmtree(self.folder_path)
+            self.finished.emit(True, "Record deleted successfully.")
+        except Exception as e:
+            self.finished.emit(False, f"Could not delete record: {str(e)}")
+
+
 # ---------------- NEW RECORD DIALOG ----------------
 class NewRecordDialog(QDialog, Ui_NewRecord):
     def __init__(self, storage_path):
         super().__init__()
         self.setupUi(self)
         self.storage_path = storage_path
+        self.setAcceptDrops(True) # Enable drag-and-drop
 
         # Initialize a string container for the circular log buffer
         self.status_buffer = ""
@@ -74,6 +219,10 @@ class NewRecordDialog(QDialog, Ui_NewRecord):
         # Configure data tree table display
         self.View_AllRecordsTable.clear()
         self.View_AllRecordsTable.header().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        
+        # Enable custom context menu for the new record tree view
+        self.View_AllRecordsTable.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.View_AllRecordsTable.customContextMenuRequested.connect(self.open_custom_context_menu)
 
         # Bind UI control button events
         self.NewRecord_Button_SetName.clicked.connect(self.set_record_name_from_input)
@@ -114,6 +263,13 @@ class NewRecordDialog(QDialog, Ui_NewRecord):
             item_type = "Folder" if p.endswith("/") else "File"
             name = os.path.basename(p.strip("/"))
             item = QTreeWidgetItem([str(i + 1), name, item_type, p])
+            
+            # Show root path when hover (Tooltip)
+            full_p = os.path.join(self.root_path, p) if self.root_path else p
+            root_tooltip = f"Root Path: {self.root_path}" if self.root_path else "Root Path: Not set"
+            for col in range(item.columnCount()):
+                item.setToolTip(col, f"{root_tooltip}\nFull Path: {full_p}")
+
             self.View_AllRecordsTable.addTopLevelItem(item)
 
     def set_record_name_from_input(self):
@@ -256,6 +412,96 @@ class NewRecordDialog(QDialog, Ui_NewRecord):
             self.refresh_table_view()
         else:
             self.update_status_bar("⚠ List is empty, nothing to undo.")
+            
+    def open_custom_context_menu(self, pos):
+        """Handles right-click events on the New Record table."""
+        item = self.View_AllRecordsTable.itemAt(pos)
+        if not item:
+            return
+
+        idx = self.View_AllRecordsTable.indexOfTopLevelItem(item)
+        if idx < 0 or idx >= len(self.relative_list):
+            return
+            
+        path_val = self.relative_list[idx]
+        item_type = "Folder" if path_val.endswith("/") else "File"
+        name = os.path.basename(path_val.strip("/"))
+
+        menu = QMenu(self)
+        act_delete = QAction(f"Delete {item_type}: {name}", self)
+        act_update_root = QAction("Update root path", self)
+
+        act_delete.triggered.connect(lambda: self.remove_item_from_list(idx))
+        act_update_root.triggered.connect(self.force_recalculate_root_path)
+
+        menu.addAction(act_delete)
+        menu.addAction(act_update_root)
+        menu.exec(self.View_AllRecordsTable.viewport().mapToGlobal(pos))
+
+    def remove_item_from_list(self, idx):
+        """Removes a specific item from the new record file list."""
+        if 0 <= idx < len(self.relative_list):
+            removed = self.relative_list.pop(idx)
+            self.update_status_bar(f"⛔ Removed item: {removed}")
+            self.refresh_table_view()
+
+    def force_recalculate_root_path(self):
+        """Calculates the longest shared path among all recorded files as the Root Path."""
+        if not self.relative_list:
+            self.update_status_bar("⚠ List is empty. Cannot update root directory.")
+            return
+            
+        abs_paths = []
+        for p in self.relative_list:
+            if os.path.isabs(p):
+                abs_paths.append(p)
+            elif self.root_path:
+                abs_paths.append(os.path.join(self.root_path, p).replace("\\", "/"))
+        
+        if not abs_paths:
+            self.update_status_bar("⚠ No valid paths to calculate root.")
+            return
+
+        try:
+            common_root = os.path.commonpath(abs_paths).replace("\\", "/")
+            self.root_path = common_root
+            
+            new_list = []
+            for p in abs_paths:
+                rel = os.path.relpath(p, self.root_path).replace("\\", "/")
+                if p.endswith('/') or os.path.isdir(p):
+                    rel += '/'
+                new_list.append(rel)
+                
+            self.relative_list = new_list
+            self.refresh_table_view()
+            self.update_status_bar(f"✅ RootPath updated to longest shared path: {self.root_path}")
+        except Exception as e:
+            self.update_status_bar(f"❌ Failed to update RootPath: {str(e)}")
+
+    def dragEnterEvent(self, event):
+        """Accepts drag events if they contain file paths."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        """Handles dropped files by adding them to the record list."""
+        urls = event.mimeData().urls()
+        if urls:
+            event.acceptProposedAction()
+            # Process all dropped files/folders
+            for url in urls:
+                path = url.toLocalFile()
+                if os.path.exists(path):
+                    # This simulates the user typing the path and clicking "Add"
+                    self.NewRecord_YourPath_Value.setText(path)
+                    self.add_path_logic()
+            # Clear the input box after processing all dropped items
+            self.NewRecord_YourPath_Value.clear()
+        else:
+            super().dropEvent(event)
 
     def accept(self):
         """Executes the actual backup process: creating folders, copying data, and saving metadata."""
@@ -266,42 +512,69 @@ class NewRecordDialog(QDialog, Ui_NewRecord):
             QMessageBox.warning(self, "Config Error", "Please verify a valid RootPath before finishing.")
             return
 
-        # Generate unique folder name based on current timestamp
-        folder_name = f"Record_{datetime.now().strftime('%Y_%B_%d_%H%M%S')}"
-        record_path = os.path.join(self.storage_path, folder_name)
+        self.progress_dialog = QProgressDialog("Calculating files...", "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Backup Progress")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.setAutoReset(False)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.setMinimumDuration(0) # Show immediately
         
-        try:
-            os.makedirs(record_path, exist_ok=True)
-            for rel in self.relative_list:
-                src = os.path.join(self.root_path, rel)
-                dest = os.path.join(record_path, rel)
-                if rel.endswith('/') or os.path.isdir(src):
-                    shutil.copytree(src, dest, dirs_exist_ok=True)
-                else:
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    shutil.copy2(src, dest)
+        # Make the progress log text selectable so it can be copied
+        for label in self.progress_dialog.findChildren(QLabel):
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        self.worker = BackupWorker(
+            self.root_path, self.storage_path, self.relative_list, 
+            self.record_name, self.record_desc
+        )
+        self.worker.progress.connect(self.update_progress)
+        self.worker.ask_error.connect(self.handle_backup_error)
+        self.worker.finished.connect(self.backup_finished)
+        self.progress_dialog.canceled.connect(self.worker.cancel)
+        
+        self.worker.start()
+        self.progress_dialog.exec()
+        
+    def handle_backup_error(self, filepath, error_msg):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Copy Error")
+        msg.setText(f"Failed to copy:\n{filepath}\n\nError: {error_msg}")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Retry | 
+            QMessageBox.StandardButton.Ignore | 
+            QMessageBox.StandardButton.Abort
+        )
+        skip_all_button = msg.addButton("Skip All", QMessageBox.ButtonRole.ActionRole)
+        msg.setDefaultButton(QMessageBox.StandardButton.Retry)
+        msg.exec()
 
-            # Metadata structure to be saved as YAML
-            record_data = {
-                "GeneralInfo": [
-                    {"Name": self.record_name},
-                    {"Desc": self.record_desc},
-                    {"FolderName": folder_name},
-                    {"StoragePath": self.storage_path},
-                    {"Path2Record": os.path.join("${StoragePath}", folder_name)},
-                    {"RootPath": self.root_path},
-                    {"RelativePathList": self.relative_list}
-                ]
-            }
+        clicked_button = msg.clickedButton()
+        if clicked_button == skip_all_button:
+            self.worker.set_error_action("SkipAll")
+        else:
+            standard_button = msg.standardButton(clicked_button)
+            if standard_button == QMessageBox.StandardButton.Ignore:
+                self.worker.set_error_action("Skip")
+            elif standard_button == QMessageBox.StandardButton.Abort:
+                self.worker.set_error_action("Abort")
+            else: # Default to Retry
+                self.worker.set_error_action("Retry")
 
-            yml_file = os.path.join(record_path, "RecordStructure.yml")
-            with open(yml_file, 'w', encoding='utf-8') as f:
-                yaml.dump(record_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    def update_progress(self, percent, msg):
+        self.progress_dialog.setValue(percent)
+        self.progress_dialog.setLabelText(msg)
 
-            QMessageBox.information(self, "Success", f"Record '{self.record_name}' has been successfully archived!")
+    def backup_finished(self, success, msg):
+        self.progress_dialog.close()
+        if success:
+            QMessageBox.information(self, "Success", msg)
             super().accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Critical Error", f"Error during file packaging: {str(e)}")
+        else:
+            if msg == "Backup cancelled by user.":
+                QMessageBox.warning(self, "Cancelled", msg)
+            else:
+                QMessageBox.critical(self, "Critical Error", f"Error during file packaging: {msg}")
 
 
 # ---------------- MAIN PROGRAM ----------------
@@ -549,12 +822,31 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            try:
-                shutil.rmtree(rec_data["_folder"])
-                self.scan_storage_to_ram()
-                QMessageBox.information(self, "Success", f"Record '{name}' has been completely removed!")
-            except Exception as e:
-                QMessageBox.critical(self, "Delete Error", f"Could not remove record folder: {str(e)}")
+            self.delete_progress_dialog = QProgressDialog(f"Deleting record '{name}'...", None, 0, 0, self)
+            self.delete_progress_dialog.setWindowTitle("Deletion in Progress")
+            self.delete_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.delete_progress_dialog.setCancelButton(None) # Deletion is not safely cancellable
+            
+            # Make text selectable
+            for label in self.delete_progress_dialog.findChildren(QLabel):
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+            self.delete_worker = DeleteWorker(rec_data["_folder"])
+            self.delete_worker.finished.connect(lambda success, msg: self.delete_finished(success, msg, name))
+            self.delete_worker.start()
+
+            self.delete_progress_dialog.exec()
+
+    def delete_finished(self, success, msg, record_name):
+        """Handles the completion of the delete worker thread."""
+        self.delete_progress_dialog.close()
+        if success:
+            self.scan_storage_to_ram()
+            QMessageBox.information(self, "Success", f"Record '{record_name}' has been completely removed!")
+        else:
+            QMessageBox.critical(self, "Delete Error", msg)
+            # Refresh anyway to reflect partial deletion state if any
+            self.scan_storage_to_ram()
 
     def menu_edit_yaml_sync_logic(self, rec_data):
         """
@@ -655,8 +947,33 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         record_folder = self.selected_record_data["_folder"]
         rel_list = self.selected_record_data.get("RelativePathList", [])
         
+        skip_all_errors = False
         overwrite_all = False
         restored_count = 0
+        
+        total_files = 0
+        for rel in rel_list:
+            src = os.path.join(record_folder, rel)
+            if os.path.isdir(src):
+                for dirpath, _, filenames in os.walk(src):
+                    total_files += len(filenames)
+            elif os.path.exists(src):
+                total_files += 1
+                
+        if total_files == 0:
+            total_files = 1
+
+        progress_dialog = QProgressDialog("Restoring files...", "Cancel", 0, total_files, self)
+        progress_dialog.setWindowTitle("Paste Progress")
+        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setValue(0)
+
+        # Make text selectable
+        for label in progress_dialog.findChildren(QLabel):
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        processed_count = 0
 
         for rel in rel_list:
             src = os.path.join(record_folder, rel)
@@ -668,35 +985,90 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             if os.path.isdir(src):
                 for dirpath, _, filenames in os.walk(src):
                     for fname in filenames:
+                        if progress_dialog.wasCanceled():
+                            QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
+                            return
+
                         s_file = os.path.join(dirpath, fname)
                         rel_to_src = os.path.relpath(s_file, src)
                         d_file = os.path.join(dest, rel_to_src)
                         
+                        progress_dialog.setLabelText(f"Restoring: {fname}")
+                        QApplication.processEvents()
+
                         if os.path.exists(d_file) and not overwrite_all:
                             ans = self.prompt_overwrite_confirmation_dialog(d_file)
                             if ans == QMessageBox.StandardButton.YesToAll: 
                                 overwrite_all = True
                             elif ans == QMessageBox.StandardButton.Cancel: 
+                                progress_dialog.close()
                                 return
                             elif ans == QMessageBox.StandardButton.No: 
+                                processed_count += 1
+                                progress_dialog.setValue(processed_count)
                                 continue
                                 
-                        os.makedirs(os.path.dirname(d_file), exist_ok=True)
-                        shutil.copy2(s_file, d_file)
-                        restored_count += 1
+                        while True:
+                            try:
+                                os.makedirs(os.path.dirname(d_file), exist_ok=True)
+                                shutil.copy2(s_file, d_file)
+                                restored_count += 1
+                                break
+                            except Exception as e:
+                                if skip_all_errors: break
+                                ans = self.prompt_copy_error_dialog(s_file, str(e))
+                                if ans == "Skip": break
+                                elif ans == "SkipAll":
+                                    skip_all_errors = True
+                                    break
+                                elif ans == "Abort":
+                                    progress_dialog.close()
+                                    QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
+                                    return
+                        processed_count += 1
+                        progress_dialog.setValue(processed_count)
             else:
+                if progress_dialog.wasCanceled():
+                    QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
+                    return
+
+                progress_dialog.setLabelText(f"Restoring: {os.path.basename(src)}")
+                QApplication.processEvents()
+
                 if os.path.exists(dest) and not overwrite_all:
                     ans = self.prompt_overwrite_confirmation_dialog(dest)
                     if ans == QMessageBox.StandardButton.YesToAll: 
                         overwrite_all = True
                     elif ans == QMessageBox.StandardButton.Cancel: 
+                        progress_dialog.close()
                         return
                     elif ans == QMessageBox.StandardButton.No: 
+                        processed_count += 1
+                        progress_dialog.setValue(processed_count)
                         continue
 
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.copy2(src, dest)
-                restored_count += 1
+                while True:
+                    try:
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        shutil.copy2(src, dest)
+                        restored_count += 1
+                        break
+                    except Exception as e:
+                        if skip_all_errors: break
+                        ans = self.prompt_copy_error_dialog(src, str(e))
+                        if ans == "Skip": break
+                        elif ans == "SkipAll":
+                            skip_all_errors = True
+                            break
+                        elif ans == "Abort":
+                            progress_dialog.close()
+                            QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
+                            return
+                            
+                processed_count += 1
+                progress_dialog.setValue(processed_count)
+        
+        progress_dialog.close()
         
         QMessageBox.information(
             self, "Restore Successful", 
@@ -717,6 +1089,30 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         msg.setDefaultButton(QMessageBox.StandardButton.Yes)
         return msg.exec()
 
+    def prompt_copy_error_dialog(self, filepath, error_msg):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Copy Error")
+        msg.setText(f"Failed to copy:\n{filepath}\n\nError: {error_msg}")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Retry | 
+            QMessageBox.StandardButton.Ignore | 
+            QMessageBox.StandardButton.Abort
+        )
+        skip_all_button = msg.addButton("Skip All", QMessageBox.ButtonRole.ActionRole)
+        msg.setDefaultButton(QMessageBox.StandardButton.Retry)
+        msg.exec()
+
+        clicked_button = msg.clickedButton()
+        if clicked_button == skip_all_button:
+            return "SkipAll"
+
+        standard_button = msg.standardButton(clicked_button)
+        if standard_button == QMessageBox.StandardButton.Ignore:
+            return "Skip"
+        elif standard_button == QMessageBox.StandardButton.Abort:
+            return "Abort"
+        
+        return "Retry"
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -3,7 +3,7 @@
 ################################################################################
 ## Form generated from reading UI file 'stasher.ui'
 ##
-## Created by: Qt User Interface Compiler version 6.11.1
+## Created by: Qt User Interface Compiler version 6.6.3
 ##
 ## WARNING! All changes made in this file will be lost when recompiling UI file!
 ################################################################################
@@ -90,7 +90,7 @@ class Ui_StasherMain(object):
         StasherMain.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(StasherMain)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 802, 33))
+        self.menubar.setGeometry(QRect(0, 0, 802, 23))
         self.menuFile = QMenu(self.menubar)
         self.menuFile.setObjectName(u"menuFile")
         StasherMain.setMenuBar(self.menubar)
@@ -108,7 +108,7 @@ class Ui_StasherMain(object):
     # setupUi
 
     def retranslateUi(self, StasherMain):
-        StasherMain.setWindowTitle(QCoreApplication.translate("StasherMain", u"MainWindow", None))
+        StasherMain.setWindowTitle(QCoreApplication.translate("StasherMain", u"Stasher Main Window", None))
         self.actionOpen_config.setText(QCoreApplication.translate("StasherMain", u"Open config", None))
         self.actionClose.setText(QCoreApplication.translate("StasherMain", u"Close", None))
         self.Group_Summary.setTitle(QCoreApplication.translate("StasherMain", u"Summary", None))
@@ -124,20 +124,20 @@ class Ui_StasherMain(object):
         self.Edit_Button_RefreshRecords.setText(QCoreApplication.translate("StasherMain", u"Refresh record(s)", None))
         self.Group_View.setTitle(QCoreApplication.translate("StasherMain", u"View", None))
         ___qtreewidgetitem = self.View_AllRecordsTable.headerItem()
-        ___qtreewidgetitem.setText(4, QCoreApplication.translate("StasherMain", u"Desc", None))
-        ___qtreewidgetitem.setText(3, QCoreApplication.translate("StasherMain", u"File(s)/Folder(s)", None))
-        ___qtreewidgetitem.setText(2, QCoreApplication.translate("StasherMain", u"RootDir", None))
-        ___qtreewidgetitem.setText(1, QCoreApplication.translate("StasherMain", u"Name", None))
-        ___qtreewidgetitem.setText(0, QCoreApplication.translate("StasherMain", u"No.", None))
+        ___qtreewidgetitem.setText(4, QCoreApplication.translate("StasherMain", u"Desc", None));
+        ___qtreewidgetitem.setText(3, QCoreApplication.translate("StasherMain", u"File(s)/Folder(s)", None));
+        ___qtreewidgetitem.setText(2, QCoreApplication.translate("StasherMain", u"RootDir", None));
+        ___qtreewidgetitem.setText(1, QCoreApplication.translate("StasherMain", u"Name", None));
+        ___qtreewidgetitem.setText(0, QCoreApplication.translate("StasherMain", u"No.", None));
 
         __sortingEnabled = self.View_AllRecordsTable.isSortingEnabled()
         self.View_AllRecordsTable.setSortingEnabled(False)
         ___qtreewidgetitem1 = self.View_AllRecordsTable.topLevelItem(0)
-        ___qtreewidgetitem1.setText(4, QCoreApplication.translate("StasherMain", u"Record Desc 0", None))
-        ___qtreewidgetitem1.setText(3, QCoreApplication.translate("StasherMain", u"file0 <br> file1 <br> file2 ", None))
-        ___qtreewidgetitem1.setText(2, QCoreApplication.translate("StasherMain", u"/path/to/rootdir", None))
-        ___qtreewidgetitem1.setText(1, QCoreApplication.translate("StasherMain", u"Record Name 0", None))
-        ___qtreewidgetitem1.setText(0, QCoreApplication.translate("StasherMain", u"1", None))
+        ___qtreewidgetitem1.setText(4, QCoreApplication.translate("StasherMain", u"Record Desc 0", None));
+        ___qtreewidgetitem1.setText(3, QCoreApplication.translate("StasherMain", u"file0 <br> file1 <br> file2 ", None));
+        ___qtreewidgetitem1.setText(2, QCoreApplication.translate("StasherMain", u"/path/to/rootdir", None));
+        ___qtreewidgetitem1.setText(1, QCoreApplication.translate("StasherMain", u"Record Name 0", None));
+        ___qtreewidgetitem1.setText(0, QCoreApplication.translate("StasherMain", u"1", None));
         self.View_AllRecordsTable.setSortingEnabled(__sortingEnabled)
 
         self.View_Path2PatchFolder_Button.setText(QCoreApplication.translate("StasherMain", u"Paste into", None))
