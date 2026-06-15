@@ -1,0 +1,13 @@
+GeneralInfo:
+- Name: peakpatch
+- Desc: ''
+- FolderName: Record_2026_June_15_140619
+- StoragePath: C:\Users\phu.nguyen-thanh\Documents\UserData
+- Path2Record: ${StoragePath}\Record_2026_June_15_140619
+- RootPath: C:/Users/phu.nguyen-thanh/Documents/WorkSpace/GitCloned/June14_Peaks
+- RelativePathList:
+  - test_files/src/SEGGER_RTT_Wrapper.h
+  - test_files/shared/common.xml
+  - test_files/shared/tools_cfg.yml
+  - ra/fsp/src/r_dtc/r_dtc.c
+  - projects/rm_comms_spi.xml

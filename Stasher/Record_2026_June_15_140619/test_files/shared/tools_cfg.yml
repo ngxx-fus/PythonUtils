@@ -1,0 +1,13 @@
+# The purpose of this file is to hold info about tools that might change across systems. For example, the path
+# to where tools are installed. The actual configuration of the tools is stored in different files (eg: tools.yml).
+gcc_install: C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/13.3 rel1/
+iar_install: /opt/iarsystems/bxarm/arm
+llvm_install: C:/Renesas/e2_studio/toolchains/llvm_arm/LLVMEmbeddedToolchainForArm-17.0.1-Windows-x86_64/
+ac6_install: /opt/arm_compiler_6
+clang_tidy_install: /opt/clang-tidy
+# Set to empty string if you wish to not use scons cache.
+# Example for using network share from Windows machine. NOTE, this was very slow over VPN.
+# Also, in my limited testing it does not appears that SCons can share cached files between Windows and Linux builds.
+# <scons_cache_dir>\\rtpflexbuild3.rea.renesas.com\scons_cache</scons_cache_dir>
+# Disabling while we investigate improvements.
+scons_cache_dir: /cache

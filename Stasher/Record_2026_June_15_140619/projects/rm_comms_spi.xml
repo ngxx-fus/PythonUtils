@@ -1,0 +1,340 @@
+<?xml version="1.0" ?>
+<projects>
+    <project>
+        <name>bare_metal_sci_spi</name>
+        <boards>
+            <board>ra6m3_pk</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_sci_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+        </include_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SCI_SPI_DTC_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>RM_COMMS_SPI_TEST_BLOCKING=0</macro>
+            <macro>RM_COMMS_SPI_TEST_LOCKING=0</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=1</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>freertos_sci_spi</name>
+        <boards>
+            <board>ra6m3_pk</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_sci_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+            <include>ra/aws/FreeRTOS/FreeRTOS/Source/include</include>
+            <include>ra/fsp/src/rm_freertos_port</include>
+        </include_dirs>
+        <third_party_test_dirs>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/event_groups.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/list.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/queue.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/stream_buffer.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/tasks.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/timers.c</src>
+            <src>ra/fsp/src/rm_freertos_port</src>
+        </third_party_test_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SCI_SPI_DTC_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>BSP_CFG_RTOS=2</macro>
+            <macro>configSUPPORT_STATIC_ALLOCATION=1</macro>
+            <macro>configUSE_MUTEXES=1</macro>
+            <macro>configUSE_RECURSIVE_MUTEXES=1</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=1</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_TEST_BLOCKING=0, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="locking_blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>threadx_sci_spi</name>
+        <boards>
+            <board>ra6m3_pk</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_sci_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/rm_threadx_port</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+            <include>ra/microsoft/azure-rtos/threadx/common/inc</include>
+            <include>ra/fsp/src/rm_threadx_port</include>
+            <include>ra/test_files/microsoft/tx_user.h</include>
+        </include_dirs>
+        <third_party_test_dirs>
+            <src>ra/microsoft/azure-rtos/threadx/common/src</src>
+        </third_party_test_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SCI_SPI_DTC_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>BSP_CFG_RTOS=1</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=1</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_TEST_BLOCKING=0, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="locking_blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>bare_metal_spi</name>
+        <boards>
+            <board>ra6m4_ek</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+        </include_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SPI_DMA_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>RM_COMMS_SPI_TEST_BLOCKING=0</macro>
+            <macro>RM_COMMS_SPI_TEST_LOCKING=0</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=0</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>freertos_spi</name>
+        <boards>
+            <board>ra6m4_ek</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+            <include>ra/aws/FreeRTOS/FreeRTOS/Source/include</include>
+            <include>ra/fsp/src/rm_freertos_port</include>
+        </include_dirs>
+        <third_party_test_dirs>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/event_groups.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/list.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/queue.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/stream_buffer.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/tasks.c</src>
+            <src>ra/aws/FreeRTOS/FreeRTOS/Source/timers.c</src>
+            <src>ra/fsp/src/rm_freertos_port</src>
+        </third_party_test_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SPI_DMA_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>BSP_CFG_RTOS=2</macro>
+            <macro>configSUPPORT_STATIC_ALLOCATION=1</macro>
+            <macro>configUSE_MUTEXES=1</macro>
+            <macro>configUSE_RECURSIVE_MUTEXES=1</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=0</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_TEST_BLOCKING=0, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="locking_blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>threadx_spi</name>
+        <boards>
+            <board>ra6m4_ek</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_spi</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/rm_threadx_port</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+            <include>ra/microsoft/azure-rtos/threadx/common/inc</include>
+            <include>ra/fsp/src/rm_threadx_port</include>
+            <include>ra/test_files/microsoft/tx_user.h</include>
+        </include_dirs>
+        <third_party_test_dirs>
+            <src>ra/microsoft/azure-rtos/threadx/common/src</src>
+        </third_party_test_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SPI_DMA_SUPPORT_ENABLE=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>BSP_CFG_RTOS=1</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=0</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_TEST_BLOCKING=0, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=0</macro>
+                <macro name="locking_blocking">RM_COMMS_SPI_TEST_BLOCKING=1, RM_COMMS_SPI_TEST_LOCKING=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>bare_metal</name>
+        <boards>
+            <board>ra8m1_ek</board>
+        </boards>
+        <common_dirs>
+            <src>ra/fsp/src/r_spi_b</src>
+            <src>ra/fsp/src/r_ioport</src>
+            <src>ra/fsp/src/r_dtc</src>
+        </common_dirs>
+        <test_dirs> <!-- Test and support files only, no module files should be listed here. - test_dirs files may override optimizations or instrumentation that should be applied to module files -->
+            <src>ra/fsp/src/!test/rm_comms</src>
+            <src>ra/fsp/src/rm_comms_spi/!test</src>
+        </test_dirs>
+        <include_dirs>
+            <include>ra/fsp/inc/api/</include>
+        </include_dirs>
+        <main_dirs>
+            <src>ra/fsp/src/rm_comms_spi</src>
+            <src>ra/fsp/src/rm_comms_lock</src>
+        </main_dirs>
+        <common_macros>
+            <macro>SPI_B_CFG_DMA_SUPPORT_ENABLE=1</macro>
+            <!-- TODO: Need to remove below macro after enabled D-Cache globally. -->
+            <macro>BSP_CFG_DCACHE_ENABLED=1</macro>
+        </common_macros>
+        <test_macros>
+            <macro>FSP_TEST_FUNCTION=RunAllRM_COMMSTests</macro>
+            <macro>TEST_RM_COMMS_SPI=1</macro>
+            <macro>RM_COMMS_SPI_TEST_BLOCKING=0</macro>
+            <macro>RM_COMMS_SPI_TEST_LOCKING=0</macro>
+            <macro>RM_COMMS_SPI_CFG_SLAVE_SELECT_ENABLE=0</macro>
+        </test_macros>
+        <main_macro_configurations>
+            <main_macro_configuration>
+                <macro name="">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=0, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=0</macro>
+                <macro name="pc">RM_COMMS_SPI_CFG_PARAM_CHECKING_ENABLE=1, RM_COMMS_TEST_PARAM_CHECKING_ENABLE=1</macro>
+            </main_macro_configuration>
+        </main_macro_configurations>
+    </project>
+    <project>
+        <name>example</name>
+        <module_src_only>true</module_src_only>
+        <boards>
+            <board>ra6m3_pk</board>
+            <board>ra6m4_ek</board>
+        </boards>
+        <main_dirs>            <!-- code under test, relative to repository root -->
+            <src>ra/fsp/src/rm_comms_spi/!example</src>
+        </main_dirs>
+    </project>
+</projects>

@@ -1,0 +1,76 @@
+<?xml version="1.0" ?>
+
+<project>
+    <name>common</name>
+    <include_dirs>        <!-- relative to repository root -->
+        <include>test_files/src/unity</include>
+        <include>ra/ThrowTheSwitch/Unity/src</include>
+        <include>ra/ThrowTheSwitch/Unity/extras/fixture/src</include>
+        <include>ra/ThrowTheSwitch/Unity/extras/memory/src</include>
+        <include>test_files/ra_cfg/microsoft</include>
+        <include>test_files/ra_cfg/aws</include>
+        <include>test_files/ra_cfg/arm</include>
+        <include>test_files/ra_cfg/fsp_cfg</include>
+        <include>test_files/ra_cfg/fsp_cfg/bsp</include>
+        <include>ra/fsp/inc</include>
+        <include>ra/fsp/inc/api/cmsis/Include</include>
+        <include>ra/fsp/inc/api</include>
+        <include>ra/fsp/inc/instances</include>
+        <include>ra/tes/dave2d/inc</include>
+        <include>ra/tes/dave2d/src</include>
+        <include>test_files/src</include>
+        <include>test_files/src/RTT</include>
+        <include>ra/arm/CMSIS_6/CMSIS/Core/Include</include>
+        <include>ra/aws/FreeRTOS/FreeRTOS/Source/include</include>
+        <include>ra/segger/emwin/AppWizard</include>
+        <include>ra/segger/emwin/Core</include>
+        <include>ra/segger/emwin/DisplayDriver</include>
+        <include>ra/segger/emwin/Widget</include>
+        <include>ra/segger/emwin/WM</include>
+        <include>ra/fsp/src/rm_emwin_port</include>
+        <include>ra/fsp/src/rm_freertos_port</include>
+        <include>ra/fsp/src/bsp/mcu/${MCU}/!linker/${COMPILER}/${PROJECT_TYPE}</include>
+    </include_dirs>
+    <common_dirs>        <!-- relative to repository root -->
+        <!-- bsp_common.c must be built with the test specific build configurations in order for the error logging tests to build. -->
+        <src>ra/fsp/src/bsp/mcu/all</src>
+        <src>ra/fsp/src/bsp/mcu/${MCU}</src>
+        <src>ra/fsp/src/bsp/cmsis/Device/RENESAS/Source</src>
+        <src>ra/fsp/src/r_ioport/r_ioport.c</src>
+    </common_dirs>
+    <exclude_dirs>
+        <exclude>.xml_tests</exclude>
+    </exclude_dirs>
+    <no_instrument_files>        <!-- Do not instrument these for coverage -->
+<!--         <src>ra/fsp/src/bsp/cmsis/Device/RENESAS/Source/startup.c</src> -->
+<!--         <src>ra/fsp/src/bsp/cmsis/Device/RENESAS/Source/system.c</src> -->
+<!--         <src>ra/fsp/src/bsp/mcu/all/bsp_delay.c</src> -->
+    </no_instrument_files>
+    <common_macros>
+        <macro>UNITY_INCLUDE_CONFIG_H=1</macro>
+        <macro>UNITY_OUTPUT_CHAR=fsp_rtt_putchar</macro>
+        <macro>FSP_TEST_NO_SEMIHOSTING=1</macro>
+    </common_macros>
+    <test_dirs>
+        <src>test_files/src/r_tests_runner_main.c</src>
+    </test_dirs>
+    <third_party_test_dirs>
+        <src>test_files/src/RTT/SEGGER_RTT_printf.c</src>
+        <src>test_files/src/RTT/SEGGER_RTT.c</src>
+        <src>test_files/src/RTT/SEGGER_RTT_Syscalls_${COMPILER_UPPER}.c</src>
+        <!-- <src>test_files/src/fsp_syscalls_gcc.c</src> -->
+        <src>ra/ThrowTheSwitch/Unity/src</src>
+        <src>ra/ThrowTheSwitch/Unity/extras/fixture/src</src>
+        <src>ra/ThrowTheSwitch/Unity/extras/memory/src</src>
+        <src>test_files/src/unity/unity_extend.c</src>
+    </third_party_test_dirs>
+    <test_macros>
+        <macro>TEST_FSP_UNITY_VERBOSE=1</macro>
+    </test_macros>
+    <linker_scripts>        <!-- relative to repository root or linker_paths -->
+        <script>script/${COMPILER}/fsp</script>
+    </linker_scripts>
+    <linker_includes>
+        <path>ra/fsp/src/bsp/mcu/${MCU}/!linker/${COMPILER}</path>
+    </linker_includes>
+</project>
