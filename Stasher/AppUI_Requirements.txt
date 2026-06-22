@@ -2,3 +2,4 @@ pyside6>=6.0.0
 pyside6_addons>=6.0.0
 pyside6_essentials>=6.0.0
 PyYAML>=6.0.0
+paramiko>=3.0.0

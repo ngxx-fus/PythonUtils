@@ -116,8 +116,13 @@ You can open this file and change the value of `"PATH_STORAGE"` to the central d
 * The status box at the very bottom (**Recently Status**) integrates a circular buffer to help you track real-time copy progress visually.
 
 ### Restore data (Paste/Unstash):
-* On the main screen (**MainWindow**), right-click on the Record you want to restore.
-* Select the **Paste/Restore** feature, and the file structure will automatically replicate exactly at the destination, mimicking the `git stash apply` behavior.
+* On the main screen (**MainWindow**), right-click on the Record you want to restore and choose **Select this record**.
+* In the `<Paste into>` section:
+  * **Local path**: Enter a local path (or leave empty to restore to the record's original `RootPath`).
+  * **Full SSH path**: Enter `fus@<IP>:<path/to/destination>`. If no connection info exists in `.ssh_config`, the **SSH Connection** popup will prompt for credentials.
+  * **Unix path**: Enter `<path/to/destination>`. If no connection info exists in `.ssh_config`, the **SSH Connection** popup will prompt for credentials.
+  * **Path not found**: Any path not found locally will automatically prompt the **SSH Connection** popup.
+  * Click the **SSH** button next to `<Paste into>` to configure and save SSH credentials at any time.
 
 ---
 
