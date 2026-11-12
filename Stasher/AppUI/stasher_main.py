@@ -30,6 +30,16 @@ SSH_CONFIG_JSON = "stasher_ssh_config.json"
 SSH_CONFIG_FILE = ".ssh_config"
 DEFAULT_STORAGE = r"C:\Users\phu.nguyen-thanh\Documents\UserData"
 
+NO_WINDOW_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+def get_app_icon():
+    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    for name in ("stasher.ico", "stasher.png"):
+        p = os.path.join(base_dir, name)
+        if os.path.exists(p):
+            return QIcon(p)
+    return QIcon()
+
 
 """
 /*
@@ -549,7 +559,8 @@ class SSHTestWorker(QThread):
             if not self.password:
                 res = subprocess.run(
                     ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_target, "echo ready"],
-                    capture_output=True, text=True, timeout=7
+                    capture_output=True, text=True, timeout=7,
+                    creationflags=NO_WINDOW_FLAGS
                 )
                 if res.returncode == 0:
                     self.finished.emit(True, "")
@@ -810,7 +821,8 @@ class RestoreWorker(QThread):
             self.progress.emit(5, f"Connecting via OpenSSH to {ssh_target}...")
             check_res = subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh_target, "echo ready"],
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                creationflags=NO_WINDOW_FLAGS
             )
             if check_res.returncode == 0:
                 self._run_scp_restore(ssh_target, total_files)
@@ -1100,10 +1112,18 @@ class RestoreWorker(QThread):
 
                 parent_remote = posixpath.dirname(dest_remote)
                 if parent_remote and parent_remote != ".":
-                    subprocess.run(["ssh", ssh_target, f"mkdir -p '{parent_remote}'"], capture_output=True)
+                    subprocess.run(
+                        ["ssh", ssh_target, f"mkdir -p '{parent_remote}'"],
+                        capture_output=True,
+                        creationflags=NO_WINDOW_FLAGS
+                    )
 
                 scp_cmd = ["scp", "-r", src, f"{ssh_target}:{dest_remote}"]
-                res = subprocess.run(scp_cmd, capture_output=True, text=True)
+                res = subprocess.run(
+                    scp_cmd,
+                    capture_output=True, text=True,
+                    creationflags=NO_WINDOW_FLAGS
+                )
                 if res.returncode == 0:
                     restored_count += 1
                     processed_count += 1
@@ -1141,6 +1161,7 @@ class SSHConnectionDialog(QDialog):
     def __init__(self, parent=None, default_ip="", default_username="", default_password="", save_default=True):
         super().__init__(parent)
         self.setWindowTitle("SSH Connection")
+        self.setWindowIcon(get_app_icon())
         self.setModal(True)
         self.resize(380, 200)
 
@@ -1234,14 +1255,14 @@ class PasswordCellWidget(QWidget):
         layout.setSpacing(6)
 
         self.label = QLabel()
-        self.btn_toggle = QPushButton("<Show>")
-        self.btn_toggle.setFixedWidth(65)
+        self.btn_toggle = QPushButton("Show")
+        self.btn_toggle.setFixedWidth(60)
         self.btn_toggle.setStyleSheet("padding: 2px 4px; font-size: 11px;")
 
         if not self.password:
             self.label.setText("N/A")
             self.btn_toggle.setEnabled(False)
-            self.btn_toggle.setText("<N/A>")
+            self.btn_toggle.setText("N/A")
         else:
             self.label.setText("••••••••")
             self.btn_toggle.clicked.connect(self.toggle_visibility)
@@ -1252,11 +1273,11 @@ class PasswordCellWidget(QWidget):
     def toggle_visibility(self):
         if self.is_hidden:
             self.label.setText(self.password)
-            self.btn_toggle.setText("<Hide>")
+            self.btn_toggle.setText("Hide")
             self.is_hidden = False
         else:
             self.label.setText("••••••••")
-            self.btn_toggle.setText("<Show>")
+            self.btn_toggle.setText("Show")
             self.is_hidden = True
 
 
@@ -1270,6 +1291,7 @@ class SSHHostManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("SSH Host List")
+        self.setWindowIcon(get_app_icon())
         self.resize(750, 420)
         self.setModal(True)
 
@@ -1309,7 +1331,7 @@ class SSHHostManagerDialog(QDialog):
         self.btn_edit = QPushButton("Edit")
         self.btn_delete = QPushButton("Delete")
         self.btn_test = QPushButton("Test")
-        self.btn_close = QPushButton("<Close>")
+        self.btn_close = QPushButton("Close")
 
         self.btn_add.clicked.connect(self.handle_add)
         self.btn_edit.clicked.connect(self.handle_edit)
@@ -1472,6 +1494,7 @@ class ChangeConfigPathDialog(QDialog):
     def __init__(self, current_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Change config path")
+        self.setWindowIcon(get_app_icon())
         self.resize(500, 140)
         self.setModal(True)
         self.new_path = None
@@ -1496,8 +1519,8 @@ class ChangeConfigPathDialog(QDialog):
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        self.btn_close = QPushButton("<Close>")
-        self.btn_done = QPushButton("<Done>")
+        self.btn_close = QPushButton("Close")
+        self.btn_done = QPushButton("Done")
         self.btn_done.setDefault(True)
 
         self.btn_close.clicked.connect(self.reject)
@@ -1551,6 +1574,7 @@ class ChangeAppFolderDialog(QDialog):
     def __init__(self, current_folder, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Change app folder path")
+        self.setWindowIcon(get_app_icon())
         self.resize(500, 140)
         self.setModal(True)
         self.new_folder = None
@@ -1575,8 +1599,8 @@ class ChangeAppFolderDialog(QDialog):
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        self.btn_close = QPushButton("<Close>")
-        self.btn_done = QPushButton("<Done>")
+        self.btn_close = QPushButton("Close")
+        self.btn_done = QPushButton("Done")
         self.btn_done.setDefault(True)
 
         self.btn_close.clicked.connect(self.reject)
@@ -1627,6 +1651,7 @@ class NewRecordDialog(QDialog, Ui_NewRecord):
     def __init__(self, storage_path):
         super().__init__()
         self.setupUi(self)
+        self.setWindowIcon(get_app_icon())
         self.storage_path = storage_path
         self.setAcceptDrops(True) 
 
@@ -2144,10 +2169,9 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         self.setupUi(self)
 
         # Set Window Icon if available
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_dir, "stasher.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        app_icon = get_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
 
         self.config = load_config()
         self.storage_path = self.config.get("PATH_STORAGE", DEFAULT_STORAGE)
@@ -3354,7 +3378,22 @@ class StasherApp(QMainWindow, Ui_StasherMain):
 
 # Evaluate root execution script sequence property path
 if __name__ == "__main__":
+    # Hide black console window on Windows and set explicit AppUserModelID
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ngxx-fus.stasher.app.1")
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd != 0:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
+    
+    app_icon = get_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     
     # Configure interface style constraint evaluation map parameter
     app.setStyle("Fusion") 

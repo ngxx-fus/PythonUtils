@@ -51,13 +51,43 @@ jobs:
           $ver = python Stasher/AppUI/get_version.py
           echo "VERSION=$ver" >> $env:GITHUB_ENV
           Write-Host "Stasher Version: $ver"
+          python Stasher/AppUI/get_version.py --generate
 
       - name: Build standalone stasher.exe
         shell: pwsh
         working-directory: Stasher/AppUI
         run: |
           $env:PYTHONPATH = "."
-          pyinstaller --clean --noconfirm --onefile --windowed --icon="stasher.ico" --name "stasher" stasher_main.py
+          pyinstaller --clean --noconfirm --onefile --windowed --icon="stasher.ico" --add-data "stasher.ico;." --add-data "stasher.png;." --version-file="file_version_info.txt" --name "stasher" stasher_main.py
+
+      - name: Sign stasher.exe with ngxx-fus Certificate
+        shell: pwsh
+        run: |
+          # 1. Create Self-signed Code Signing Certificate for Publisher: ngxx-fus
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=ngxx-fus" `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -HashAlgorithm SHA256
+
+          # 2. Export public .cer for users to easily trust
+          Export-Certificate -Cert $cert -FilePath "Stasher/AppUI/dist/ngxx-fus.cer"
+
+          # 3. Export pfx for signing
+          $pwd = ConvertTo-SecureString -String "StasherPass123" -Force -AsPlainText
+          $certPath = "$env:TEMP\ngxx-fus.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $pwd
+
+          # 4. Find Windows SDK signtool.exe
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1).FullName
+          Write-Host "Using signtool: $signtool"
+
+          # 5. Sign stasher.exe with timestamp
+          & $signtool sign /f $certPath /p "StasherPass123" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "Stasher/AppUI/dist/stasher.exe"
+
+          # 6. Clean up temporary pfx
+          Remove-Item $certPath -Force
+          Write-Host "stasher.exe signed successfully with publisher: ngxx-fus"
 
       - name: Verify build artifact
         shell: pwsh
@@ -74,7 +104,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stasher-windows-x64
-          path: Stasher/AppUI/dist/stasher.exe
+          path: |
+            Stasher/AppUI/dist/stasher.exe
+            Stasher/AppUI/dist/ngxx-fus.cer
           if-no-files-found: error
 
   # ====================================================
@@ -115,7 +147,7 @@ jobs:
         working-directory: Stasher/AppUI
         run: |
           export PYTHONPATH="."
-          pyinstaller --clean --noconfirm --onedir --windowed --name "stasher" stasher_main.py
+          pyinstaller --clean --noconfirm --onedir --windowed --add-data "stasher.png:." --name "stasher" stasher_main.py
 
       - name: Package stasher.AppImage
         working-directory: Stasher/AppUI
@@ -236,4 +268,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             release_assets/stasher.exe
+            release_assets/ngxx-fus.cer
             release_assets/stasher.AppImage

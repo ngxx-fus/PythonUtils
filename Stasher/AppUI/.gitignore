@@ -12,4 +12,5 @@ dist/
 *.AppImage
 AppDir/
 squashfs-root/
+file_version_info.txt
 
