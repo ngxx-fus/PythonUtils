@@ -119,10 +119,10 @@ You can open this file and change the value of `"PATH_STORAGE"` to the central d
 * On the main screen (**MainWindow**), right-click on the Record you want to restore and choose **Select this record**.
 * In the `<Paste into>` section:
   * **Local path**: Enter a local path (or leave empty to restore to the record's original `RootPath`).
-  * **Full SSH path**: Enter `fus@<IP>:<path/to/destination>`. If no connection info exists in `.ssh_config`, the **SSH Connection** popup will prompt for credentials.
-  * **Unix path**: Enter `<path/to/destination>`. If no connection info exists in `.ssh_config`, the **SSH Connection** popup will prompt for credentials.
+  * **Full SSH path**: Enter `fus@<IP>:<path/to/destination>`. Credentials are saved in `stasher_ssh_config.json`, while `.ssh_config` and `~/.ssh/config` are read-only.
+  * **Unix path / Host alias**: Enter `<path/to/destination>` or `coder.coffee-opera:~/Downloads`. If defined in `.ssh_config` / `~/.ssh/config` (keys, proxy commands), it connects directly without needing user/password.
   * **Path not found**: Any path not found locally will automatically prompt the **SSH Connection** popup.
-  * Click the **SSH** button next to `<Paste into>` to configure and save SSH credentials at any time.
+  * Click the **SSH** button next to `<Paste into>` to configure and save SSH credentials into `stasher_ssh_config.json` at any time.
 
 ---
 

@@ -5,6 +5,7 @@ __pycache__/
 .DemoRecords/
 .Records/
 .ssh_config
+stasher_ssh_config.json
 build/
 dist/
 *.spec

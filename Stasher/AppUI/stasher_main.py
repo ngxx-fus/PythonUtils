@@ -25,26 +25,29 @@ from stasher_ui import Ui_StasherMain
 from stasher_newrecord_ui import Ui_NewRecord
 
 CONFIG_FILE = "stasher_config.json"
+SSH_CONFIG_JSON = "stasher_ssh_config.json"
 SSH_CONFIG_FILE = ".ssh_config"
 DEFAULT_STORAGE = r"C:\Users\phu.nguyen-thanh\Documents\UserData"
 
 
 """
 /*
- * SSH Configuration helpers (.ssh_config)
+ * SSH Configuration helpers:
+ * - Dedicated JSON storage: stasher_ssh_config.json (Read/Write)
+ * - OpenSSH config: .ssh_config and ~/.ssh/config (READ-ONLY)
  */
 """
-def get_ssh_config_path():
-    if os.path.exists(SSH_CONFIG_FILE):
-        return os.path.abspath(SSH_CONFIG_FILE)
+def get_ssh_json_path():
+    if os.path.exists(SSH_CONFIG_JSON):
+        return os.path.abspath(SSH_CONFIG_JSON)
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    app_cfg = os.path.join(base_dir, SSH_CONFIG_FILE)
+    app_cfg = os.path.join(base_dir, SSH_CONFIG_JSON)
     if os.path.exists(app_cfg):
         return app_cfg
     return app_cfg
 
-def load_ssh_config():
-    path = get_ssh_config_path()
+def load_ssh_json():
+    path = get_ssh_json_path()
     if not os.path.exists(path):
         return {}
     try:
@@ -54,7 +57,11 @@ def load_ssh_config():
         return {}
 
 def save_ssh_config(ip, username, password):
-    cfg = load_ssh_config()
+    """
+    Saves SSH connection credentials ONLY to stasher_ssh_config.json.
+    Never writes to .ssh_config or ~/.ssh/config.
+    """
+    cfg = load_ssh_json()
     cfg["ip"] = ip
     cfg["username"] = username
     cfg["password"] = password
@@ -64,42 +71,69 @@ def save_ssh_config(ip, username, password):
         "username": username,
         "password": password
     }
-    path = get_ssh_config_path()
+    path = get_ssh_json_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4)
         return True
     except Exception as e:
-        print(f"Error saving {SSH_CONFIG_FILE}: {e}")
+        print(f"Error saving {SSH_CONFIG_JSON}: {e}")
         return False
+
+def get_ssh_config_path():
+    """
+    Returns path to .ssh_config (READ-ONLY).
+    """
+    if os.path.exists(SSH_CONFIG_FILE):
+        return os.path.abspath(SSH_CONFIG_FILE)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, SSH_CONFIG_FILE)
 
 def lookup_openssh_config(host):
     """
-    Looks up host alias or configuration in OpenSSH formatted files (.ssh_config or ~/.ssh/config).
+    READ-ONLY lookup of host alias or configuration in OpenSSH formatted files (.ssh_config or ~/.ssh/config).
+    Never writes to .ssh_config.
     """
-    for cfg_file in [get_ssh_config_path(), os.path.expanduser("~/.ssh/config")]:
-        if os.path.exists(cfg_file):
-            try:
-                ssh_conf = paramiko.SSHConfig()
-                with open(cfg_file, "r", encoding="utf-8") as f:
-                    ssh_conf.parse(f)
-                matched = ssh_conf.lookup(host)
-                if matched and (matched.get("hostname") or matched.get("user")):
-                    ident = matched.get("identityfile")
-                    key_file = ident[0] if isinstance(ident, list) and ident else ident
-                    return {
-                        "ip": matched.get("hostname", host),
-                        "username": matched.get("user", ""),
-                        "password": "",
-                        "port": int(matched.get("port", 22)),
-                        "key_filename": key_file
-                    }
-            except Exception:
-                pass
+    candidate_files = []
+    local_ssh = get_ssh_config_path()
+    if os.path.exists(local_ssh):
+        candidate_files.append(local_ssh)
+    user_ssh = os.path.expanduser("~/.ssh/config")
+    if os.path.exists(user_ssh) and user_ssh not in candidate_files:
+        candidate_files.append(user_ssh)
+
+    for cfg_file in candidate_files:
+        try:
+            ssh_conf = paramiko.SSHConfig()
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                ssh_conf.parse(f)
+            matched = ssh_conf.lookup(host)
+            if matched and (matched.get("hostname") or matched.get("user") or matched.get("proxycommand")):
+                ident = matched.get("identityfile")
+                key_file = ident[0] if isinstance(ident, list) and ident else ident
+                proxy_cmd = matched.get("proxycommand")
+                if proxy_cmd:
+                    proxy_cmd = proxy_cmd.replace("%h", host).replace("%p", str(matched.get("port", 22)))
+                return {
+                    "ip": matched.get("hostname", host),
+                    "username": matched.get("user", ""),
+                    "password": "",
+                    "port": int(matched.get("port", 22)),
+                    "key_filename": key_file,
+                    "proxycommand": proxy_cmd
+                }
+        except Exception:
+            pass
     return None
 
 def get_ssh_connection(ip=None, username=None):
-    cfg = load_ssh_config()
+    """
+    Retrieves SSH connection info.
+    Priority:
+    1. Dedicated stasher_ssh_config.json (stores saved user/passwords)
+    2. Read-only .ssh_config and ~/.ssh/config (OpenSSH host aliases, proxycommands, keys)
+    """
+    cfg = load_ssh_json()
 
     if ip:
         if cfg:
@@ -118,7 +152,7 @@ def get_ssh_connection(ip=None, username=None):
                     "password": cfg.get("password", "")
                 }
 
-        # Check OpenSSH config / ~/.ssh/config for host alias
+        # Check Read-only OpenSSH config (.ssh_config / ~/.ssh/config) for host alias
         openssh_info = lookup_openssh_config(ip)
         if openssh_info:
             if username:
@@ -432,20 +466,20 @@ class SSHConnectionDialog(QDialog):
         form_layout.setSpacing(10)
         form_layout.setColumnStretch(1, 1)
 
-        lbl_ip = QLabel("IP")
+        lbl_ip = QLabel("IP / Host")
         self.input_ip = QLineEdit()
-        self.input_ip.setPlaceholderText("IP address or host")
+        self.input_ip.setPlaceholderText("IP address or host (e.g. coder.coffee-opera)")
         self.input_ip.setText(default_ip)
 
         lbl_user = QLabel("Username")
         self.input_user = QLineEdit()
-        self.input_user.setPlaceholderText("Username")
+        self.input_user.setPlaceholderText("Username (optional)")
         self.input_user.setText(default_username)
 
         lbl_pass = QLabel("Password")
         self.input_pass = QLineEdit()
         self.input_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.input_pass.setPlaceholderText("Password")
+        self.input_pass.setPlaceholderText("Password (optional if using SSH key/agent)")
         self.input_pass.setText(default_password)
 
         form_layout.addWidget(lbl_ip, 0, 0)
@@ -484,13 +518,8 @@ class SSHConnectionDialog(QDialog):
         pwd = self.input_pass.text()
 
         if not ip:
-            QMessageBox.warning(self, "Input Required", "Please enter an IP address.")
+            QMessageBox.warning(self, "Input Required", "Please enter an IP address or Host.")
             self.input_ip.setFocus()
-            return
-
-        if not user:
-            QMessageBox.warning(self, "Input Required", "Please enter a Username.")
-            self.input_user.setFocus()
             return
 
         if self.chk_save.isChecked():
@@ -1931,7 +1960,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         """
         Explicitly triggers the SSH Connection popup (.1.)
         """
-        cfg = load_ssh_config()
+        cfg = load_ssh_json()
         dlg = SSHConnectionDialog(
             self,
             default_ip=cfg.get("ip", ""),
@@ -1943,7 +1972,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             info = dlg.get_connection_info()
             QMessageBox.information(
                 self, "SSH Connection Configured",
-                f"SSH connection saved for {info['username']}@{info['ip']} in {SSH_CONFIG_FILE}."
+                f"SSH connection saved for {info['username'] or 'default'}@{info['ip']} in {SSH_CONFIG_JSON}."
             )
 
     """
@@ -1963,12 +1992,12 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             target_info = parse_destination_type(user_paste_path)
             if target_info["is_ssh"]:
                 conn = get_ssh_connection(ip=target_info["ip"], username=target_info["username"])
-                if not conn or not conn.get("ip") or not conn.get("username") or (not conn.get("password") and not conn.get("key_filename")):
+                if not conn or not conn.get("ip"):
                     dlg = SSHConnectionDialog(
                         self,
-                        default_ip=target_info["ip"] or (conn.get("ip") if conn else ""),
-                        default_username=target_info["username"] or (conn.get("username") if conn else ""),
-                        default_password=(conn.get("password") if conn else ""),
+                        default_ip=target_info["ip"] or "",
+                        default_username=target_info["username"] or "",
+                        default_password="",
                         save_default=True
                     )
                     if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1977,7 +2006,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
 
                 self.execute_ssh_paste(
                     ip=conn["ip"],
-                    username=conn["username"],
+                    username=conn.get("username", "") or target_info["username"] or "",
                     password=conn.get("password", ""),
                     default_remote_path=target_info["remote_path"],
                     port=conn.get("port"),
@@ -1992,12 +2021,12 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             target_info = parse_destination_type(first_root)
             if target_info["is_ssh"]:
                 conn = get_ssh_connection(ip=target_info["ip"], username=target_info["username"])
-                if not conn or not conn.get("ip") or not conn.get("username") or (not conn.get("password") and not conn.get("key_filename")):
+                if not conn or not conn.get("ip"):
                     dlg = SSHConnectionDialog(
                         self,
-                        default_ip=target_info["ip"] or (conn.get("ip") if conn else ""),
-                        default_username=target_info["username"] or (conn.get("username") if conn else ""),
-                        default_password=(conn.get("password") if conn else ""),
+                        default_ip=target_info["ip"] or "",
+                        default_username=target_info["username"] or "",
+                        default_password="",
                         save_default=True
                     )
                     if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -2006,7 +2035,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
 
                 self.execute_ssh_paste(
                     ip=conn["ip"],
-                    username=conn["username"],
+                    username=conn.get("username", "") or target_info["username"] or "",
                     password=conn.get("password", ""),
                     default_remote_path="",
                     port=conn.get("port"),
@@ -2230,7 +2259,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         if total_files == 0:
             total_files = 1
 
-        progress_dialog = QProgressDialog(f"Connecting to SSH ({username}@{ip})...", "Cancel", 0, total_files, self)
+        progress_dialog = QProgressDialog(f"Connecting to SSH ({username or ''}@{ip})...", "Cancel", 0, total_files, self)
         progress_dialog.setWindowTitle("Paste Progress (SSH)")
         progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         progress_dialog.setMinimumDuration(0)
@@ -2239,6 +2268,20 @@ class StasherApp(QMainWindow, Ui_StasherMain):
         for label in progress_dialog.findChildren(QLabel):
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         QApplication.processEvents()
+
+        ssh_target = f"{username}@{ip}" if username else ip
+
+        # If no password provided (e.g. coder.coffee-opera, SSH keys, SSH agent):
+        if not password:
+            progress_dialog.setLabelText(f"Connecting via OpenSSH to {ssh_target}...")
+            QApplication.processEvents()
+            check_res = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh_target, "echo ready"],
+                capture_output=True, text=True
+            )
+            if check_res.returncode == 0:
+                self._execute_scp_paste(ssh_target, default_remote_path, progress_dialog)
+                return
 
         # Parse port if specified (e.g. host:2222)
         conn_port = port if port else 22
@@ -2257,7 +2300,7 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             ssh_client.connect(
                 hostname=host_to_connect,
                 port=conn_port,
-                username=username,
+                username=username if username else None,
                 password=password if password else None,
                 key_filename=key_filename if key_filename else None,
                 timeout=12,
@@ -2454,6 +2497,67 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             self, "Restore Successful",
             f"Paste operation finished via SSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
         )
+
+    def _execute_scp_paste(self, ssh_target, default_remote_path, progress_dialog):
+        restored_count = 0
+        processed_count = 0
+        remote_base = default_remote_path.replace("\\", "/") if default_remote_path else ""
+
+        for rec in self.selected_records_data:
+            current_remote_base = remote_base
+            if not current_remote_base:
+                rec_root = rec.get("RootPath", "").replace("\\", "/")
+                current_remote_base = rec_root
+                if not current_remote_base:
+                    continue
+
+            # Ensure remote base directory exists
+            subprocess.run(["ssh", ssh_target, f"mkdir -p {current_remote_base}"], capture_output=True)
+            record_folder = rec["_folder"]
+
+            for rel in rec.get("RelativePathList", []):
+                src = os.path.join(record_folder, rel)
+                if not os.path.exists(src):
+                    continue
+
+                rel_posix = rel.replace("\\", "/").lstrip("/")
+                dest_remote = posixpath.join(current_remote_base, rel_posix)
+
+                if progress_dialog.wasCanceled():
+                    progress_dialog.close()
+                    QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
+                    return
+
+                fname = os.path.basename(src)
+                progress_dialog.setLabelText(f"Restoring to {ssh_target}: {fname}")
+                QApplication.processEvents()
+
+                # Ensure remote parent directory exists
+                parent_remote = posixpath.dirname(dest_remote)
+                if parent_remote:
+                    subprocess.run(["ssh", ssh_target, f"mkdir -p {parent_remote}"], capture_output=True)
+
+                scp_cmd = ["scp", "-r", src, f"{ssh_target}:{dest_remote}"]
+                res = subprocess.run(scp_cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    restored_count += 1
+                else:
+                    ans = self.prompt_copy_error_dialog(f"{src} -> {ssh_target}:{dest_remote}", res.stderr)
+                    if ans == "Abort":
+                        progress_dialog.close()
+                        QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
+                        return
+
+                processed_count += 1
+                progress_dialog.setValue(processed_count)
+
+        progress_dialog.close()
+        target_display = f"{ssh_target}:{remote_base}" if remote_base else ssh_target
+        QMessageBox.information(
+            self, "Restore Successful",
+            f"Paste operation finished via OpenSSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
+        )
+
 
 
     """
