@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QMessageBox, QDialog, QHeaderView,
     QTextEdit, QProgressDialog, QLabel,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLineEdit, QPushButton, QCheckBox
+    QLineEdit, QPushButton, QCheckBox,
+    QTableWidget, QTableWidgetItem, QFileDialog, QWidget
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QAction, QPalette, QIcon
@@ -69,7 +70,8 @@ def save_ssh_config(ip, username, password):
         cfg["hosts"] = {}
     cfg["hosts"][ip] = {
         "username": username,
-        "password": password
+        "password": password,
+        "updated_at": datetime.now().strftime("%y/%m/%d %H:%M:%S")
     }
     path = get_ssh_json_path()
     try:
@@ -79,6 +81,88 @@ def save_ssh_config(ip, username, password):
     except Exception as e:
         print(f"Error saving {SSH_CONFIG_JSON}: {e}")
         return False
+
+def delete_ssh_host(ip):
+    """
+    Deletes an SSH host from stasher_ssh_config.json.
+    Never modifies .ssh_config or ~/.ssh/config.
+    """
+    cfg = load_ssh_json()
+    deleted = False
+    if "hosts" in cfg and isinstance(cfg["hosts"], dict) and ip in cfg["hosts"]:
+        del cfg["hosts"][ip]
+        deleted = True
+    if cfg.get("ip") == ip:
+        cfg["ip"] = ""
+        cfg["username"] = ""
+        cfg["password"] = ""
+        deleted = True
+    if deleted:
+        path = get_ssh_json_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"Error updating {SSH_CONFIG_JSON}: {e}")
+            return False
+    return False
+
+def get_all_known_ssh_hosts():
+    """
+    Returns a combined list of SSH hosts from stasher_ssh_config.json and OpenSSH configs (.ssh_config / ~/.ssh/config).
+    """
+    hosts_list = []
+    seen = set()
+
+    # 1. From stasher_ssh_config.json
+    cfg = load_ssh_json()
+    if cfg:
+        hosts = cfg.get("hosts", {})
+        if isinstance(hosts, dict):
+            for ip, data in hosts.items():
+                if ip and ip not in seen:
+                    seen.add(ip)
+                    hosts_list.append({
+                        "ip": ip,
+                        "username": data.get("username", "") or "N/A",
+                        "password": data.get("password", "") or "",
+                        "updated_at": data.get("updated_at", "") or datetime.now().strftime("%y/%m/%d %H:%M:%S"),
+                        "source": "json"
+                    })
+
+    # 2. From OpenSSH configs (.ssh_config and ~/.ssh/config) - READ-ONLY
+    candidate_files = []
+    local_ssh = get_ssh_config_path()
+    if os.path.exists(local_ssh):
+        candidate_files.append(local_ssh)
+    user_ssh = os.path.expanduser("~/.ssh/config")
+    if os.path.exists(user_ssh) and user_ssh not in candidate_files:
+        candidate_files.append(user_ssh)
+
+    for cfg_file in candidate_files:
+        try:
+            ssh_conf = paramiko.SSHConfig()
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                ssh_conf.parse(f)
+            for entry in getattr(ssh_conf, "_config", []):
+                names = entry.get("host", [])
+                for name in names:
+                    if name and name != "*" and not name.startswith("*") and name not in seen:
+                        seen.add(name)
+                        cfg_data = entry.get("config", {})
+                        mtime = datetime.fromtimestamp(os.path.getmtime(cfg_file)).strftime("%y/%m/%d %H:%M:%S")
+                        hosts_list.append({
+                            "ip": name,
+                            "username": cfg_data.get("user", "") or "N/A",
+                            "password": "",
+                            "updated_at": mtime,
+                            "source": "openssh"
+                        })
+        except Exception:
+            pass
+
+    return hosts_list
 
 def get_ssh_config_path():
     """
@@ -445,6 +529,608 @@ class DeleteWorker(QThread):
             self.finished.emit(False, f"Could not delete record: {str(e)}")
 
 
+# ---------------- SSH TEST WORKER (PREVENTS UI FREEZING) ----------------
+class SSHTestWorker(QThread):
+    finished = Signal(bool, str)
+
+    def __init__(self, ip, username, password):
+        super().__init__()
+        self.ip = ip
+        self.username = username
+        self.password = password
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        ssh_target = f"{self.username}@{self.ip}" if self.username else self.ip
+        try:
+            if not self.password:
+                res = subprocess.run(
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_target, "echo ready"],
+                    capture_output=True, text=True, timeout=7
+                )
+                if res.returncode == 0:
+                    self.finished.emit(True, "")
+                else:
+                    err = res.stderr.strip() or f"Process exited with code {res.returncode}"
+                    self.finished.emit(False, err)
+            else:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                port = 22
+                ip_addr = self.ip
+                if ":" in ip_addr and not ip_addr.startswith("["):
+                    try:
+                        parts = ip_addr.split(":")
+                        ip_addr = parts[0]
+                        port = int(parts[1])
+                    except Exception:
+                        pass
+                client.connect(
+                    hostname=ip_addr,
+                    port=port,
+                    username=self.username if self.username else None,
+                    password=self.password if self.password else None,
+                    timeout=6,
+                    allow_agent=True,
+                    look_for_keys=True
+                )
+                client.close()
+                self.finished.emit(True, "")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+# ---------------- RESTORE WORKER (PREVENTS UI FREEZING) ----------------
+class RestoreWorker(QThread):
+    progress = Signal(int, str)
+    ask_overwrite = Signal(str)
+    ask_error = Signal(str, str)
+    finished = Signal(bool, str)
+
+    def __init__(self, selected_records_data, is_ssh=False, ssh_conn=None, target_remote_path="", user_paste_path=""):
+        super().__init__()
+        self.selected_records_data = selected_records_data
+        self.is_ssh = is_ssh
+        self.ssh_conn = ssh_conn or {}
+        self.target_remote_path = target_remote_path
+        self.user_paste_path = user_paste_path
+
+        self._is_cancelled = False
+        self.sync_event = threading.Event()
+        self.user_action = None
+        self.skip_all_errors = False
+        self.overwrite_all = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.sync_event.set()
+
+    def set_user_action(self, action):
+        self.user_action = action
+        self.sync_event.set()
+
+    def run(self):
+        try:
+            if self.is_ssh:
+                self._run_ssh_restore()
+            else:
+                self._run_local_restore()
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+    def _run_local_restore(self):
+        total_files = 0
+        for rec in self.selected_records_data:
+            for rel in rec.get("RelativePathList", []):
+                src = os.path.join(rec["_folder"], rel)
+                if os.path.isdir(src):
+                    for _, _, filenames in os.walk(src):
+                        total_files += len(filenames)
+                elif os.path.exists(src):
+                    total_files += 1
+
+        if total_files == 0:
+            total_files = 1
+
+        processed_count = 0
+        restored_count = 0
+
+        for rec in self.selected_records_data:
+            if self._is_cancelled:
+                self.finished.emit(False, "Cancelled by user.")
+                return
+
+            current_paste_path = self.user_paste_path or rec.get("RootPath", "")
+            if not current_paste_path:
+                continue
+
+            os.makedirs(current_paste_path, exist_ok=True)
+            record_folder = rec["_folder"]
+
+            for rel in rec.get("RelativePathList", []):
+                if self._is_cancelled:
+                    self.finished.emit(False, "Cancelled by user.")
+                    return
+
+                src = os.path.join(record_folder, rel)
+                if not os.path.exists(src):
+                    continue
+
+                rel_norm = rel.replace("/", os.sep).replace("\\", os.sep).strip(os.sep)
+                paste_norm = current_paste_path.rstrip("/\\")
+                if paste_norm.endswith(os.sep + rel_norm) or paste_norm == rel_norm:
+                    dest = paste_norm
+                elif os.path.basename(paste_norm) == os.path.basename(rel_norm) and len(rec.get("RelativePathList", [])) == 1:
+                    dest = paste_norm
+                else:
+                    dest = os.path.join(current_paste_path, rel)
+
+                if os.path.isdir(src):
+                    for dirpath, _, filenames in os.walk(src):
+                        for fname in filenames:
+                            if self._is_cancelled:
+                                self.finished.emit(False, "Cancelled by user.")
+                                return
+
+                            s_file = os.path.join(dirpath, fname)
+                            rel_to_src = os.path.relpath(s_file, src)
+                            d_file = os.path.join(dest, rel_to_src)
+
+                            percent = int((processed_count / total_files) * 100)
+                            self.progress.emit(min(percent, 99), f"Restoring: {fname}")
+
+                            if os.path.exists(d_file) and not self.overwrite_all:
+                                self.sync_event.clear()
+                                self.ask_overwrite.emit(d_file)
+                                self.sync_event.wait()
+                                if self._is_cancelled or self.user_action == "Cancel":
+                                    self.finished.emit(False, "Cancelled by user.")
+                                    return
+                                elif self.user_action == "YesToAll":
+                                    self.overwrite_all = True
+                                elif self.user_action == "No":
+                                    processed_count += 1
+                                    continue
+
+                            while True:
+                                if self._is_cancelled:
+                                    self.finished.emit(False, "Cancelled by user.")
+                                    return
+                                try:
+                                    os.makedirs(os.path.dirname(d_file), exist_ok=True)
+                                    shutil.copy2(s_file, d_file)
+                                    restored_count += 1
+                                    processed_count += 1
+                                    break
+                                except Exception as e:
+                                    if self.skip_all_errors:
+                                        processed_count += 1
+                                        break
+                                    self.sync_event.clear()
+                                    self.ask_error.emit(d_file, str(e))
+                                    self.sync_event.wait()
+                                    if self.user_action == "Retry":
+                                        continue
+                                    elif self.user_action == "Skip":
+                                        processed_count += 1
+                                        break
+                                    elif self.user_action == "SkipAll":
+                                        self.skip_all_errors = True
+                                        processed_count += 1
+                                        break
+                                    elif self.user_action == "Abort" or self._is_cancelled:
+                                        self.finished.emit(False, "Aborted by user.")
+                                        return
+                else:
+                    if self._is_cancelled:
+                        self.finished.emit(False, "Cancelled by user.")
+                        return
+
+                    fname = os.path.basename(src)
+                    percent = int((processed_count / total_files) * 100)
+                    self.progress.emit(min(percent, 99), f"Restoring: {fname}")
+
+                    if os.path.exists(dest) and not self.overwrite_all:
+                        self.sync_event.clear()
+                        self.ask_overwrite.emit(dest)
+                        self.sync_event.wait()
+                        if self._is_cancelled or self.user_action == "Cancel":
+                            self.finished.emit(False, "Cancelled by user.")
+                            return
+                        elif self.user_action == "YesToAll":
+                            self.overwrite_all = True
+                        elif self.user_action == "No":
+                            processed_count += 1
+                            continue
+
+                    while True:
+                        if self._is_cancelled:
+                            self.finished.emit(False, "Cancelled by user.")
+                            return
+                        try:
+                            os.makedirs(os.path.dirname(dest), exist_ok=True)
+                            shutil.copy2(src, dest)
+                            restored_count += 1
+                            processed_count += 1
+                            break
+                        except Exception as e:
+                            if self.skip_all_errors:
+                                processed_count += 1
+                                break
+                            self.sync_event.clear()
+                            self.ask_error.emit(dest, str(e))
+                            self.sync_event.wait()
+                            if self.user_action == "Retry":
+                                continue
+                            elif self.user_action == "Skip":
+                                processed_count += 1
+                                break
+                            elif self.user_action == "SkipAll":
+                                self.skip_all_errors = True
+                                processed_count += 1
+                                break
+                            elif self.user_action == "Abort" or self._is_cancelled:
+                                self.finished.emit(False, "Aborted by user.")
+                                return
+
+        self.progress.emit(100, "Done")
+        self.finished.emit(
+            True,
+            f"Paste operation finished locally.\nSuccessfully restored {restored_count} components into:\n{self.user_paste_path or 'original paths'}"
+        )
+
+    def _run_ssh_restore(self):
+        ip = self.ssh_conn.get("ip")
+        username = self.ssh_conn.get("username", "")
+        password = self.ssh_conn.get("password", "")
+        port = self.ssh_conn.get("port")
+        key_filename = self.ssh_conn.get("key_filename")
+        ssh_target = f"{username}@{ip}" if username else ip
+
+        total_files = 0
+        for rec in self.selected_records_data:
+            for rel in rec.get("RelativePathList", []):
+                src = os.path.join(rec["_folder"], rel)
+                if os.path.isdir(src):
+                    for _, _, filenames in os.walk(src):
+                        total_files += len(filenames)
+                elif os.path.exists(src):
+                    total_files += 1
+        if total_files == 0:
+            total_files = 1
+
+        processed_count = 0
+        restored_count = 0
+
+        # If no password provided (e.g. coder.coffee-opera, SSH keys, OpenSSH config):
+        if not password:
+            self.progress.emit(5, f"Connecting via OpenSSH to {ssh_target}...")
+            check_res = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh_target, "echo ready"],
+                capture_output=True, text=True
+            )
+            if check_res.returncode == 0:
+                self._run_scp_restore(ssh_target, total_files)
+                return
+
+        # Paramiko SFTP connection
+        self.progress.emit(5, f"Connecting to {ssh_target}...")
+        conn_port = port if port else 22
+        host_to_connect = ip
+        if ":" in ip and not ip.startswith("["):
+            try:
+                parts = ip.split(":")
+                host_to_connect = parts[0]
+                conn_port = int(parts[1])
+            except Exception:
+                pass
+
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            ssh_client.connect(
+                hostname=host_to_connect,
+                port=conn_port,
+                username=username if username else None,
+                password=password if password else None,
+                key_filename=key_filename if key_filename else None,
+                timeout=12,
+                allow_agent=True,
+                look_for_keys=True
+            )
+            sftp = ssh_client.open_sftp()
+        except Exception as e:
+            self.finished.emit(False, f"SSH Connection Failed: {str(e)}")
+            return
+
+        def sftp_makedirs(remote_directory):
+            parts = []
+            p = remote_directory.replace("\\", "/")
+            while p and p not in ("/", "."):
+                parts.append(p)
+                parent, _ = posixpath.split(p)
+                if parent == p:
+                    break
+                p = parent
+            parts.reverse()
+            for directory in parts:
+                try:
+                    sftp.stat(directory)
+                except (IOError, FileNotFoundError):
+                    try:
+                        sftp.mkdir(directory)
+                    except (IOError, FileNotFoundError):
+                        pass
+
+        def sftp_exists(remote_path):
+            try:
+                sftp.stat(remote_path.replace("\\", "/"))
+                return True
+            except (IOError, FileNotFoundError):
+                return False
+
+        resolved_default_path = self.target_remote_path.replace("\\", "/") if self.target_remote_path else ""
+        if resolved_default_path and (resolved_default_path.startswith("~") or resolved_default_path == "~"):
+            try:
+                remote_home = sftp.normalize(".")
+                if resolved_default_path == "~":
+                    resolved_default_path = remote_home
+                else:
+                    resolved_default_path = posixpath.join(remote_home, resolved_default_path[2:])
+            except Exception:
+                pass
+
+        for rec in self.selected_records_data:
+            if self._is_cancelled:
+                sftp.close()
+                ssh_client.close()
+                self.finished.emit(False, "Cancelled by user.")
+                return
+
+            current_remote_base = resolved_default_path
+            if not current_remote_base:
+                rec_root = rec.get("RootPath", "").replace("\\", "/")
+                if rec_root.startswith("~") or rec_root == "~":
+                    try:
+                        remote_home = sftp.normalize(".")
+                        rec_root = remote_home if rec_root == "~" else posixpath.join(remote_home, rec_root[2:])
+                    except Exception:
+                        pass
+                current_remote_base = rec_root
+                if not current_remote_base:
+                    continue
+
+            record_folder = rec["_folder"]
+
+            for rel in rec.get("RelativePathList", []):
+                if self._is_cancelled:
+                    sftp.close()
+                    ssh_client.close()
+                    self.finished.emit(False, "Cancelled by user.")
+                    return
+
+                src = os.path.join(record_folder, rel)
+                if not os.path.exists(src):
+                    continue
+
+                rel_posix = rel.replace("\\", "/").strip("/")
+                remote_base_norm = current_remote_base.replace("\\", "/").rstrip("/")
+
+                if remote_base_norm.endswith("/" + rel_posix) or remote_base_norm == rel_posix:
+                    dest_remote = remote_base_norm
+                elif posixpath.basename(remote_base_norm) == posixpath.basename(rel_posix) and len(rec.get("RelativePathList", [])) == 1:
+                    dest_remote = remote_base_norm
+                else:
+                    dest_remote = posixpath.join(remote_base_norm, rel_posix)
+
+                if os.path.isdir(src):
+                    for dirpath, _, filenames in os.walk(src):
+                        for fname in filenames:
+                            if self._is_cancelled:
+                                sftp.close()
+                                ssh_client.close()
+                                self.finished.emit(False, "Cancelled by user.")
+                                return
+
+                            s_file = os.path.join(dirpath, fname)
+                            rel_to_src = os.path.relpath(s_file, src).replace("\\", "/").lstrip("/")
+                            d_remote_file = posixpath.join(dest_remote, rel_to_src)
+
+                            percent = int((processed_count / total_files) * 100)
+                            self.progress.emit(min(percent, 99), f"Restoring to {ip}: {fname}")
+
+                            if sftp_exists(d_remote_file) and not self.overwrite_all:
+                                self.sync_event.clear()
+                                self.ask_overwrite.emit(f"{username}@{ip}:{d_remote_file}")
+                                self.sync_event.wait()
+                                if self._is_cancelled or self.user_action == "Cancel":
+                                    sftp.close()
+                                    ssh_client.close()
+                                    self.finished.emit(False, "Cancelled by user.")
+                                    return
+                                elif self.user_action == "YesToAll":
+                                    self.overwrite_all = True
+                                elif self.user_action == "No":
+                                    processed_count += 1
+                                    continue
+
+                            while True:
+                                if self._is_cancelled:
+                                    sftp.close()
+                                    ssh_client.close()
+                                    self.finished.emit(False, "Cancelled by user.")
+                                    return
+                                try:
+                                    sftp_makedirs(posixpath.dirname(d_remote_file))
+                                    sftp.put(s_file, d_remote_file)
+                                    restored_count += 1
+                                    processed_count += 1
+                                    break
+                                except Exception as e:
+                                    if self.skip_all_errors:
+                                        processed_count += 1
+                                        break
+                                    self.sync_event.clear()
+                                    self.ask_error.emit(f"{username}@{ip}:{d_remote_file}", str(e))
+                                    self.sync_event.wait()
+                                    if self.user_action == "Retry":
+                                        continue
+                                    elif self.user_action == "Skip":
+                                        processed_count += 1
+                                        break
+                                    elif self.user_action == "SkipAll":
+                                        self.skip_all_errors = True
+                                        processed_count += 1
+                                        break
+                                    elif self.user_action == "Abort" or self._is_cancelled:
+                                        sftp.close()
+                                        ssh_client.close()
+                                        self.finished.emit(False, "Aborted by user.")
+                                        return
+                else:
+                    if self._is_cancelled:
+                        sftp.close()
+                        ssh_client.close()
+                        self.finished.emit(False, "Cancelled by user.")
+                        return
+
+                    fname = os.path.basename(src)
+                    percent = int((processed_count / total_files) * 100)
+                    self.progress.emit(min(percent, 99), f"Restoring to {ip}: {fname}")
+
+                    if sftp_exists(dest_remote) and not self.overwrite_all:
+                        self.sync_event.clear()
+                        self.ask_overwrite.emit(f"{username}@{ip}:{dest_remote}")
+                        self.sync_event.wait()
+                        if self._is_cancelled or self.user_action == "Cancel":
+                            sftp.close()
+                            ssh_client.close()
+                            self.finished.emit(False, "Cancelled by user.")
+                            return
+                        elif self.user_action == "YesToAll":
+                            self.overwrite_all = True
+                        elif self.user_action == "No":
+                            processed_count += 1
+                            continue
+
+                    while True:
+                        if self._is_cancelled:
+                            sftp.close()
+                            ssh_client.close()
+                            self.finished.emit(False, "Cancelled by user.")
+                            return
+                        try:
+                            sftp_makedirs(posixpath.dirname(dest_remote))
+                            sftp.put(src, dest_remote)
+                            restored_count += 1
+                            processed_count += 1
+                            break
+                        except Exception as e:
+                            if self.skip_all_errors:
+                                processed_count += 1
+                                break
+                            self.sync_event.clear()
+                            self.ask_error.emit(f"{username}@{ip}:{dest_remote}", str(e))
+                            self.sync_event.wait()
+                            if self.user_action == "Retry":
+                                continue
+                            elif self.user_action == "Skip":
+                                processed_count += 1
+                                break
+                            elif self.user_action == "SkipAll":
+                                self.skip_all_errors = True
+                                processed_count += 1
+                                break
+                            elif self.user_action == "Abort" or self._is_cancelled:
+                                sftp.close()
+                                ssh_client.close()
+                                self.finished.emit(False, "Aborted by user.")
+                                return
+
+        sftp.close()
+        ssh_client.close()
+        self.progress.emit(100, "Done")
+        target_display = f"{username}@{ip}:{resolved_default_path}" if resolved_default_path else f"{username}@{ip}"
+        self.finished.emit(
+            True,
+            f"Paste operation finished via SSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
+        )
+
+    def _run_scp_restore(self, ssh_target, total_files):
+        processed_count = 0
+        restored_count = 0
+        remote_base = self.target_remote_path.replace("\\", "/") if self.target_remote_path else ""
+
+        for rec in self.selected_records_data:
+            if self._is_cancelled:
+                self.finished.emit(False, "Cancelled by user.")
+                return
+
+            current_remote_base = remote_base or rec.get("RootPath", "").replace("\\", "/")
+            if not current_remote_base:
+                continue
+
+            record_folder = rec["_folder"]
+
+            for rel in rec.get("RelativePathList", []):
+                if self._is_cancelled:
+                    self.finished.emit(False, "Cancelled by user.")
+                    return
+
+                src = os.path.join(record_folder, rel)
+                if not os.path.exists(src):
+                    continue
+
+                rel_posix = rel.replace("\\", "/").strip("/")
+                remote_base_norm = current_remote_base.replace("\\", "/").rstrip("/")
+
+                if remote_base_norm.endswith("/" + rel_posix) or remote_base_norm == rel_posix:
+                    dest_remote = remote_base_norm
+                elif posixpath.basename(remote_base_norm) == posixpath.basename(rel_posix) and len(rec.get("RelativePathList", [])) == 1:
+                    dest_remote = remote_base_norm
+                else:
+                    dest_remote = posixpath.join(remote_base_norm, rel_posix)
+
+                fname = os.path.basename(src)
+                percent = int((processed_count / total_files) * 100)
+                self.progress.emit(min(percent, 99), f"Restoring to {ssh_target}: {fname}")
+
+                parent_remote = posixpath.dirname(dest_remote)
+                if parent_remote and parent_remote != ".":
+                    subprocess.run(["ssh", ssh_target, f"mkdir -p '{parent_remote}'"], capture_output=True)
+
+                scp_cmd = ["scp", "-r", src, f"{ssh_target}:{dest_remote}"]
+                res = subprocess.run(scp_cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    restored_count += 1
+                    processed_count += 1
+                else:
+                    if self.skip_all_errors:
+                        processed_count += 1
+                        continue
+                    self.sync_event.clear()
+                    self.ask_error.emit(f"{src} -> {ssh_target}:{dest_remote}", res.stderr)
+                    self.sync_event.wait()
+                    if self.user_action == "Skip":
+                        processed_count += 1
+                    elif self.user_action == "SkipAll":
+                        self.skip_all_errors = True
+                        processed_count += 1
+                    elif self.user_action == "Abort" or self._is_cancelled:
+                        self.finished.emit(False, "Paste operation aborted.")
+                        return
+
+        self.progress.emit(100, "Done")
+        target_display = f"{ssh_target}:{remote_base}" if remote_base else ssh_target
+        self.finished.emit(
+            True,
+            f"Paste operation finished via OpenSSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
+        )
+
+
 # ---------------- SSH CONNECTION DIALOG ----------------
 class SSHConnectionDialog(QDialog):
     """
@@ -534,6 +1220,401 @@ class SSHConnectionDialog(QDialog):
             "password": self.input_pass.text(),
             "save": self.chk_save.isChecked()
         }
+
+
+# ---------------- PASSWORD CELL WIDGET ----------------
+class PasswordCellWidget(QWidget):
+    def __init__(self, password="", parent=None):
+        super().__init__(parent)
+        self.password = password or ""
+        self.is_hidden = True
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+
+        self.label = QLabel()
+        self.btn_toggle = QPushButton("<Show>")
+        self.btn_toggle.setFixedWidth(65)
+        self.btn_toggle.setStyleSheet("padding: 2px 4px; font-size: 11px;")
+
+        if not self.password:
+            self.label.setText("N/A")
+            self.btn_toggle.setEnabled(False)
+            self.btn_toggle.setText("<N/A>")
+        else:
+            self.label.setText("••••••••")
+            self.btn_toggle.clicked.connect(self.toggle_visibility)
+
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.btn_toggle)
+
+    def toggle_visibility(self):
+        if self.is_hidden:
+            self.label.setText(self.password)
+            self.btn_toggle.setText("<Hide>")
+            self.is_hidden = False
+        else:
+            self.label.setText("••••••••")
+            self.btn_toggle.setText("<Show>")
+            self.is_hidden = True
+
+
+# ---------------- SSH HOST MANAGER DIALOG ----------------
+class SSHHostManagerDialog(QDialog):
+    """
+    /*
+     * SSH Host Manager Dialog (File > Open SSH config)
+     */
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("SSH Host List")
+        self.resize(750, 420)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        title_lbl = QLabel("SSH host list")
+        title_font = title_lbl.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title_lbl.setFont(title_font)
+        layout.addWidget(title_lbl)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["No.", "IP/Name", "Username", "Password", "Updated date"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        self.table.doubleClicked.connect(self.handle_edit)
+
+        layout.addWidget(self.table)
+
+        # Action Buttons Layout
+        btn_layout = QHBoxLayout()
+        self.btn_add = QPushButton("+ Add Host")
+        self.btn_edit = QPushButton("Edit")
+        self.btn_delete = QPushButton("Delete")
+        self.btn_test = QPushButton("Test")
+        self.btn_close = QPushButton("<Close>")
+
+        self.btn_add.clicked.connect(self.handle_add)
+        self.btn_edit.clicked.connect(self.handle_edit)
+        self.btn_delete.clicked.connect(self.handle_delete)
+        self.btn_test.clicked.connect(self.handle_test)
+        self.btn_close.clicked.connect(self.accept)
+
+        btn_layout.addWidget(self.btn_add)
+        btn_layout.addWidget(self.btn_edit)
+        btn_layout.addWidget(self.btn_delete)
+        btn_layout.addWidget(self.btn_test)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+        layout.addLayout(btn_layout)
+
+        self.hosts_data = []
+        self.populate_table()
+
+    def populate_table(self):
+        self.hosts_data = get_all_known_ssh_hosts()
+        self.table.setRowCount(len(self.hosts_data))
+
+        for row, h in enumerate(self.hosts_data):
+            # Column 0: No.
+            item_no = QTableWidgetItem(str(row + 1))
+            item_no.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 0, item_no)
+
+            # Column 1: IP/Name
+            item_ip = QTableWidgetItem(h.get("ip", ""))
+            self.table.setItem(row, 1, item_ip)
+
+            # Column 2: Username
+            item_user = QTableWidgetItem(h.get("username", "") or "N/A")
+            item_user.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 2, item_user)
+
+            # Column 3: Password with Show/Hide button
+            pwd = h.get("password", "")
+            cell_widget = PasswordCellWidget(pwd)
+            self.table.setCellWidget(row, 3, cell_widget)
+
+            # Column 4: Updated date
+            item_date = QTableWidgetItem(h.get("updated_at", "") or "N/A")
+            item_date.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 4, item_date)
+
+    def get_selected_host(self):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.hosts_data):
+            return self.hosts_data[row]
+        return None
+
+    def show_context_menu(self, pos):
+        menu = QMenu(self)
+        act_edit = menu.addAction("Edit")
+        act_delete = menu.addAction("Delete")
+        act_test = menu.addAction("Test connection")
+        menu.addSeparator()
+        act_add = menu.addAction("+ Add Host")
+
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action == act_edit:
+            self.handle_edit()
+        elif action == act_delete:
+            self.handle_delete()
+        elif action == act_test:
+            self.handle_test()
+        elif action == act_add:
+            self.handle_add()
+
+    def handle_add(self):
+        dlg = SSHConnectionDialog(self, default_ip="", default_username="", default_password="", save_default=True)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.populate_table()
+
+    def handle_edit(self):
+        host = self.get_selected_host()
+        if not host:
+            QMessageBox.warning(self, "No Host Selected", "Please select an SSH host to edit.")
+            return
+
+        dlg = SSHConnectionDialog(
+            self,
+            default_ip=host.get("ip", ""),
+            default_username=host.get("username", "") if host.get("username") != "N/A" else "",
+            default_password=host.get("password", ""),
+            save_default=True
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.populate_table()
+
+    def handle_delete(self):
+        host = self.get_selected_host()
+        if not host:
+            QMessageBox.warning(self, "No Host Selected", "Please select an SSH host to delete.")
+            return
+
+        ip = host.get("ip")
+        if host.get("source") == "openssh":
+            QMessageBox.information(
+                self,
+                "Read-only Host",
+                f"Host '{ip}' is loaded from OpenSSH config (.ssh_config or ~/.ssh/config) in read-only mode.\nTo remove it, modify your system SSH config file."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete host '{ip}' from stasher_ssh_config.json?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            delete_ssh_host(ip)
+            self.populate_table()
+
+    def handle_test(self):
+        host = self.get_selected_host()
+        if not host:
+            QMessageBox.warning(self, "No Host Selected", "Please select an SSH host to test.")
+            return
+
+        ip = host.get("ip")
+        username = host.get("username")
+        if username == "N/A":
+            username = ""
+        password = host.get("password", "")
+
+        ssh_target = f"{username}@{ip}" if username else ip
+
+        self.test_progress = QProgressDialog(f"Testing connection to {ssh_target}...", "Cancel", 0, 0, self)
+        self.test_progress.setWindowTitle("Testing SSH Connection")
+        self.test_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.test_progress.setMinimumDuration(0)
+        self.test_progress.setValue(0)
+
+        self.test_worker = SSHTestWorker(ip, username, password)
+        self.test_worker.finished.connect(lambda ok, err: self.on_test_finished(ssh_target, ok, err))
+        self.test_progress.canceled.connect(self.test_worker.cancel)
+        self.test_worker.start()
+        self.test_progress.show()
+
+    def on_test_finished(self, ssh_target, is_alive, error_msg):
+        if hasattr(self, 'test_progress') and self.test_progress:
+            self.test_progress.close()
+        if is_alive:
+            QMessageBox.information(self, "SSH Connection Test", f"Success! Host '{ssh_target}' is reachable and active.")
+        else:
+            QMessageBox.warning(self, "SSH Connection Test", f"Failed to connect to '{ssh_target}':\n{error_msg}")
+
+
+# ---------------- CHANGE CONFIG PATH DIALOG ----------------
+class ChangeConfigPathDialog(QDialog):
+    """
+    /*
+     * Dialog to change config file path (.4.)
+     */
+    """
+    def __init__(self, current_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Change config path")
+        self.resize(500, 140)
+        self.setModal(True)
+        self.new_path = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        form_layout = QHBoxLayout()
+        lbl = QLabel("Path")
+        lbl.setMinimumWidth(40)
+        self.input_path = QLineEdit()
+        self.input_path.setText(os.path.abspath(current_path))
+        self.btn_browse = QPushButton("...")
+        self.btn_browse.setFixedWidth(35)
+        self.btn_browse.clicked.connect(self.handle_browse)
+
+        form_layout.addWidget(lbl)
+        form_layout.addWidget(self.input_path, 1)
+        form_layout.addWidget(self.btn_browse)
+        layout.addLayout(form_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_close = QPushButton("<Close>")
+        self.btn_done = QPushButton("<Done>")
+        self.btn_done.setDefault(True)
+
+        self.btn_close.clicked.connect(self.reject)
+        self.btn_done.clicked.connect(self.handle_done)
+
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addWidget(self.btn_done)
+        layout.addLayout(btn_layout)
+
+    def handle_browse(self):
+        cur = self.input_path.text().strip()
+        dir_hint = os.path.dirname(cur) if os.path.exists(os.path.dirname(cur)) else ""
+        selected, _ = QFileDialog.getOpenFileName(self, "Select Config File", dir_hint, "JSON Files (*.json);;All Files (*)")
+        if selected:
+            self.input_path.setText(os.path.abspath(selected))
+
+    def handle_done(self):
+        path = self.input_path.text().strip().strip('"').strip("'")
+        if not path:
+            QMessageBox.warning(self, "Input Required", "Please enter a valid config path.")
+            return
+        if not os.path.exists(path):
+            reply = QMessageBox.question(
+                self,
+                "File Not Found",
+                f"File '{path}' does not exist.\nDo you want to create a new config at this path?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+                default_data = {"PATH_STORAGE": DEFAULT_STORAGE}
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(default_data, f, indent=4)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to create config file:\n{str(e)}")
+                return
+
+        self.new_path = os.path.abspath(path)
+        self.accept()
+
+
+# ---------------- CHANGE APP FOLDER DIALOG ----------------
+class ChangeAppFolderDialog(QDialog):
+    """
+    /*
+     * Dialog to change app storage folder path (.5.)
+     */
+    """
+    def __init__(self, current_folder, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Change app folder path")
+        self.resize(500, 140)
+        self.setModal(True)
+        self.new_folder = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        form_layout = QHBoxLayout()
+        lbl = QLabel("Path")
+        lbl.setMinimumWidth(40)
+        self.input_path = QLineEdit()
+        self.input_path.setText(os.path.abspath(current_folder))
+        self.btn_browse = QPushButton("...")
+        self.btn_browse.setFixedWidth(35)
+        self.btn_browse.clicked.connect(self.handle_browse)
+
+        form_layout.addWidget(lbl)
+        form_layout.addWidget(self.input_path, 1)
+        form_layout.addWidget(self.btn_browse)
+        layout.addLayout(form_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_close = QPushButton("<Close>")
+        self.btn_done = QPushButton("<Done>")
+        self.btn_done.setDefault(True)
+
+        self.btn_close.clicked.connect(self.reject)
+        self.btn_done.clicked.connect(self.handle_done)
+
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addWidget(self.btn_done)
+        layout.addLayout(btn_layout)
+
+    def handle_browse(self):
+        cur = self.input_path.text().strip()
+        dir_hint = cur if os.path.isdir(cur) else os.path.dirname(cur)
+        selected = QFileDialog.getExistingDirectory(self, "Select App Storage Folder", dir_hint)
+        if selected:
+            self.input_path.setText(os.path.abspath(selected))
+
+    def handle_done(self):
+        path = self.input_path.text().strip().strip('"').strip("'")
+        if not path:
+            QMessageBox.warning(self, "Input Required", "Please enter a valid folder path.")
+            return
+        if not os.path.exists(path):
+            reply = QMessageBox.question(
+                self,
+                "Folder Not Found",
+                f"Folder '{path}' does not exist.\nDo you want to create it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to create folder:\n{str(e)}")
+                return
+
+        self.new_folder = os.path.abspath(path)
+        self.accept()
 
 
 # ---------------- NEW RECORD DIALOG ----------------
@@ -1147,6 +2228,25 @@ class StasherApp(QMainWindow, Ui_StasherMain):
 
         self.Edit_GeneralUserInput.textChanged.connect(self.handle_empty_search_input)
 
+        # Setup File Menu (.1. - .5.)
+        self.menuFile.clear()
+        self.actionOpen_SSH_config = self.menuFile.addAction("Open SSH config")
+        self.actionOpen_SSH_config.triggered.connect(self.open_ssh_host_manager)
+
+        self.actionOpen_config = self.menuFile.addAction("Open config")
+        self.actionOpen_config.triggered.connect(self.open_system_config_file)
+
+        self.actionChange_config_path = self.menuFile.addAction("Change config path")
+        self.actionChange_config_path.triggered.connect(self.open_change_config_path_dialog)
+
+        self.actionChange_app_folder = self.menuFile.addAction("Change app folder")
+        self.actionChange_app_folder.triggered.connect(self.open_change_app_folder_dialog)
+
+        self.menuFile.addSeparator()
+
+        self.actionClose = self.menuFile.addAction("Close")
+        self.actionClose.triggered.connect(self.close)
+
     """
     /*
      * Helper to flatten the 'GeneralInfo' list from the YAML structure into a dictionary.
@@ -1167,27 +2267,31 @@ class StasherApp(QMainWindow, Ui_StasherMain):
     """
     def scan_storage_to_ram(self):
         self.records.clear()
-        # Verify valid core directory
-        if not os.path.exists(self.storage_path):
-            os.makedirs(self.storage_path)
+        try:
+            # Verify valid core directory
+            if not os.path.exists(self.storage_path):
+                os.makedirs(self.storage_path, exist_ok=True)
 
-        # Loop active local archives
-        for folder in os.listdir(self.storage_path):
-            folder_path = os.path.join(self.storage_path, folder)
-            yml_path = os.path.join(folder_path, "RecordStructure.yml")
+            # Loop active local archives
+            if os.path.exists(self.storage_path):
+                for folder in os.listdir(self.storage_path):
+                    folder_path = os.path.join(self.storage_path, folder)
+                    yml_path = os.path.join(folder_path, "RecordStructure.yml")
 
-            # Validate entry constraints
-            if os.path.isdir(folder_path) and os.path.exists(yml_path):
-                try:
-                    with open(yml_path, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f)
-                        info = self.extract_yaml_info(data)
-                        info["_folder"] = folder_path
-                        info["_yml"] = yml_path
-                        info["_raw_data"] = data
-                        self.records.append(info)
-                except Exception as e:
-                    print(f"Error parsing YAML file {yml_path}: {e}")
+                    # Validate entry constraints
+                    if os.path.isdir(folder_path) and os.path.exists(yml_path):
+                        try:
+                            with open(yml_path, "r", encoding="utf-8") as f:
+                                data = yaml.safe_load(f)
+                                info = self.extract_yaml_info(data)
+                                info["_folder"] = folder_path
+                                info["_yml"] = yml_path
+                                info["_raw_data"] = data
+                                self.records.append(info)
+                        except Exception as e:
+                            print(f"Error parsing YAML file {yml_path}: {e}")
+        except Exception as e:
+            print(f"Warning: Could not access storage path '{self.storage_path}': {e}")
 
         self.Summary_NumberOfRecords_Value.setText(str(len(self.records)))
         self.render_records_to_tree_view(self.records)
@@ -1198,52 +2302,43 @@ class StasherApp(QMainWindow, Ui_StasherMain):
      */
     """
     def render_records_to_tree_view(self, data_list):
-        self.View_AllRecordsTable.clear()
+        self.View_AllRecordsTable.setUpdatesEnabled(False)
+        try:
+            self.View_AllRecordsTable.clear()
+            items_to_add = []
 
-        # Generate table row representations
-        for idx, rec in enumerate(data_list):
-            # Mask hidden attributes
-            if rec["_folder"] in self.hidden_folders:
-                # Continue next iteration
-                continue
+            for idx, rec in enumerate(data_list):
+                if rec["_folder"] in self.hidden_folders:
+                    continue
 
-            # root_item = QTreeWidgetItem([
-            #     str(idx + 1),
-            #     rec.get("Name", "Unknown Name"),
-            #     rec.get("RootPath", "N/A"),
-            #     str(len(rec.get("RelativePathList", []))),
-            #     rec.get("Desc", "")
-            # ])
-            
-            root_item = QTreeWidgetItem([
-                str(idx + 1),
-                rec.get("Name", "Unknown Name"),
-                rec.get("RootPath", "N/A"),
-                str(len(rec.get("RelativePathList", []))),
-                rec.get("Desc", "")
-            ])
+                root_item = QTreeWidgetItem([
+                    str(idx + 1),
+                    rec.get("Name", "Unknown Name"),
+                    rec.get("RootPath", "N/A"),
+                    str(len(rec.get("RelativePathList", []))),
+                    rec.get("Desc", "")
+                ])
 
-            update_time = rec.get("UpdateRecordTime", "<2026/01/01-00:00:00>")
+                update_time = rec.get("UpdateRecordTime", "<2026/01/01-00:00:00>")
+                for col in range(root_item.columnCount()):
+                    root_item.setToolTip(col, f"UpdateRecordTime: {update_time}")
 
-            # Iterate through columns to inject the timestamp tooltip
-            for col in range(root_item.columnCount()):
-                root_item.setToolTip(col, f"UpdateRecordTime: {update_time}")
+                root_item.setData(0, Qt.ItemDataRole.UserRole, rec)
 
-            root_item.setData(0, Qt.ItemDataRole.UserRole, rec)
+                for p in rec.get("RelativePathList", []):
+                    icon = "📁" if p.endswith("/") else "📄"
+                    child_item = QTreeWidgetItem(["", "", "", f"{icon} {p}", ""])
+                    root_item.addChild(child_item)
 
-            # Traverse to append children sub-elements
-            for p in rec.get("RelativePathList", []):
-                icon = "📁" if p.endswith("/") else "📄"
-                child_item = QTreeWidgetItem(["", "", "", f"{icon} {p}", ""])
-                root_item.addChild(child_item)
+                for selected_rec in self.selected_records_data:
+                    if selected_rec["_folder"] == rec["_folder"]:
+                        self.apply_row_light_mode_color(root_item, highlight=True)
 
-            self.View_AllRecordsTable.addTopLevelItem(root_item)
-            
-            # Apply tracking for multi-select memory persistence
-            for selected_rec in self.selected_records_data:
-                # Validate selected memory footprint
-                if selected_rec["_folder"] == rec["_folder"]:
-                    self.apply_row_light_mode_color(root_item, highlight=True)
+                items_to_add.append(root_item)
+
+            self.View_AllRecordsTable.addTopLevelItems(items_to_add)
+        finally:
+            self.View_AllRecordsTable.setUpdatesEnabled(True)
 
     """
     /*
@@ -1956,6 +3051,65 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             QMessageBox.critical(self, "Sync Error", f"An error occurred during structure sync: {str(e)}")
 
     # ---------------- DATA RESTORATION (PASTE / PATCH) ----------------
+    def open_ssh_host_manager(self):
+        """
+        Opens internal SSH host manager dialog (.1.)
+        """
+        dlg = SSHHostManagerDialog(self)
+        dlg.exec()
+
+    def open_system_config_file(self):
+        """
+        Opens stasher_config.json via default system application (.2.)
+        """
+        config_path = os.path.abspath(CONFIG_FILE)
+        if not os.path.exists(config_path):
+            load_config()
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(config_path)
+            elif sys.platform.startswith('darwin'):
+                subprocess.run(['open', config_path])
+            else:
+                subprocess.run(['xdg-open', config_path])
+        except Exception as e:
+            QMessageBox.warning(self, "Open Config Error", f"Could not open config file:\n{str(e)}")
+
+    def open_change_config_path_dialog(self):
+        """
+        Opens dialog to change config file path (.4.)
+        """
+        global CONFIG_FILE
+        dlg = ChangeConfigPathDialog(CONFIG_FILE, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.new_path:
+            CONFIG_FILE = dlg.new_path
+            self.Summary_Path2AppConfig_Value.setText(os.path.abspath(CONFIG_FILE))
+            cfg = load_config()
+            new_storage = cfg.get("PATH_STORAGE", DEFAULT_STORAGE)
+            if new_storage != self.storage_path:
+                self.storage_path = new_storage
+                self.Summary_Path2AppFolder_Value.setText(self.storage_path)
+                self.scan_storage_to_ram()
+            QMessageBox.information(self, "Config Path Updated", f"Config path changed to:\n{CONFIG_FILE}")
+
+    def open_change_app_folder_dialog(self):
+        """
+        Opens dialog to change app storage folder (.5.)
+        """
+        dlg = ChangeAppFolderDialog(self.storage_path, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.new_folder:
+            self.storage_path = dlg.new_folder
+            self.Summary_Path2AppFolder_Value.setText(self.storage_path)
+            cfg = load_config()
+            cfg["PATH_STORAGE"] = self.storage_path
+            try:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+            except Exception as e:
+                print(f"Error saving updated storage path to {CONFIG_FILE}: {e}")
+            self.scan_storage_to_ram()
+            QMessageBox.information(self, "App Folder Updated", f"App storage folder changed to:\n{self.storage_path}")
+
     def trigger_ssh_setup_dialog(self):
         """
         Explicitly triggers the SSH Connection popup (.1.)
@@ -1987,578 +3141,161 @@ class StasherApp(QMainWindow, Ui_StasherMain):
             return
 
         user_paste_path = self.View_Path2PatchFolder_Value.text().strip().strip('"').strip("'")
-
-        if user_paste_path:
-            target_info = parse_destination_type(user_paste_path)
-            if target_info["is_ssh"]:
-                conn = get_ssh_connection(ip=target_info["ip"], username=target_info["username"])
-                if not conn or not conn.get("ip"):
-                    dlg = SSHConnectionDialog(
-                        self,
-                        default_ip=target_info["ip"] or "",
-                        default_username=target_info["username"] or "",
-                        default_password="",
-                        save_default=True
-                    )
-                    if dlg.exec() != QDialog.DialogCode.Accepted:
-                        return
-                    conn = dlg.get_connection_info()
-
-                self.execute_ssh_paste(
-                    ip=conn["ip"],
-                    username=conn.get("username", "") or target_info["username"] or "",
-                    password=conn.get("password", ""),
-                    default_remote_path=target_info["remote_path"],
-                    port=conn.get("port"),
-                    key_filename=conn.get("key_filename")
-                )
-                return
-            else:
-                self.execute_local_paste(user_paste_path)
-                return
-        else:
+        dest_to_check = user_paste_path
+        if not dest_to_check:
             first_root = self.selected_records_data[0].get("RootPath", "") if self.selected_records_data else ""
-            target_info = parse_destination_type(first_root)
-            if target_info["is_ssh"]:
-                conn = get_ssh_connection(ip=target_info["ip"], username=target_info["username"])
-                if not conn or not conn.get("ip"):
-                    dlg = SSHConnectionDialog(
-                        self,
-                        default_ip=target_info["ip"] or "",
-                        default_username=target_info["username"] or "",
-                        default_password="",
-                        save_default=True
-                    )
-                    if dlg.exec() != QDialog.DialogCode.Accepted:
-                        return
-                    conn = dlg.get_connection_info()
+            dest_to_check = first_root
 
-                self.execute_ssh_paste(
-                    ip=conn["ip"],
-                    username=conn.get("username", "") or target_info["username"] or "",
-                    password=conn.get("password", ""),
-                    default_remote_path="",
-                    port=conn.get("port"),
-                    key_filename=conn.get("key_filename")
+        target_info = parse_destination_type(dest_to_check)
+        if target_info["is_ssh"]:
+            conn = get_ssh_connection(ip=target_info["ip"], username=target_info["username"])
+            if not conn or not conn.get("ip"):
+                # SSH host not found in config (.6.) -> open SSH connection dialog
+                dlg = SSHConnectionDialog(
+                    self,
+                    default_ip=target_info["ip"] or "",
+                    default_username=target_info["username"] or "",
+                    default_password="",
+                    save_default=True
                 )
-                return
-            else:
-                self.execute_local_paste("")
-                return
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    return
+                conn = dlg.get_connection_info()
 
-    """
-    /*
-     * Local filesystem restoration routine.
-     */
-    """
-    def execute_local_paste(self, user_paste_path):
-        skip_all_errors = False
-        overwrite_all = False
-        restored_count = 0
-        total_files = 0
-
-        # Calculate sizing layout requirement logic
-        for rec in self.selected_records_data:
-            # Check secondary loop structure iteration
-            for rel in rec.get("RelativePathList", []):
-                src = os.path.join(rec["_folder"], rel)
-                # Discriminate system type element path
-                if os.path.isdir(src):
-                    # Perform node traversal configuration
-                    for dirpath, _, filenames in os.walk(src):
-                        total_files += len(filenames)
-                elif os.path.exists(src):
-                    total_files += 1
-                
-        # Protect division properties
-        if total_files == 0:
-            total_files = 1
-
-        progress_dialog = QProgressDialog("Restoring files locally...", "Cancel", 0, total_files, self)
-        progress_dialog.setWindowTitle("Paste Progress (Local)")
-        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setValue(0)
-
-        # Alter visual attributes operation layout
-        for label in progress_dialog.findChildren(QLabel):
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        processed_count = 0
-
-        # Main configuration mapping iterator phase
-        for rec in self.selected_records_data:
-            current_paste_path = user_paste_path
-            # Verify explicit operational paths map
-            if not current_paste_path:
-                current_paste_path = rec.get("RootPath", "")
-                # Double guard void location sequence path
-                if not current_paste_path:
-                    # Proceed loop skip directive instruction
-                    continue
-                    
-            # Confirm destination directory state layout
-            if not os.path.exists(current_paste_path):
-                os.makedirs(current_paste_path, exist_ok=True)
-
-            record_folder = rec["_folder"]
-            # Initiate secondary processing payload iter loop
-            for rel in rec.get("RelativePathList", []):
-                src = os.path.join(record_folder, rel)
-                dest = os.path.join(current_paste_path, rel)
-
-                # Skip invalid source property path evaluation
-                if not os.path.exists(src):
-                    # Advance iteration loop process command
-                    continue
-
-                # Confirm directory logic evaluation branch instruction
-                if os.path.isdir(src):
-                    # Start node payload evaluation command
-                    for dirpath, _, filenames in os.walk(src):
-                        # Proceed processing element iteration map
-                        for fname in filenames:
-                            # Verify dialog abort mechanism path property
-                            if progress_dialog.wasCanceled():
-                                QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
-                                # Break explicit loop function route
-                                return
-
-                            s_file = os.path.join(dirpath, fname)
-                            rel_to_src = os.path.relpath(s_file, src)
-                            d_file = os.path.join(dest, rel_to_src)
-                            
-                            progress_dialog.setLabelText(f"Restoring: {fname}")
-                            QApplication.processEvents()
-
-                            # Manage replacement scenario confirmation path instruction
-                            if os.path.exists(d_file) and not overwrite_all:
-                                ans = self.prompt_overwrite_confirmation_dialog(d_file)
-                                # Define conditional replacement properties state layout
-                                if ans == QMessageBox.StandardButton.YesToAll: 
-                                    overwrite_all = True
-                                elif ans == QMessageBox.StandardButton.Cancel: 
-                                    progress_dialog.close()
-                                    # Terminate method branch flow route
-                                    return
-                                elif ans == QMessageBox.StandardButton.No: 
-                                    processed_count += 1
-                                    progress_dialog.setValue(processed_count)
-                                    # Continue node execution command instruction
-                                    continue
-                                    
-                            # Initiate dynamic action execution retry logic map
-                            while True:
-                                try:
-                                    os.makedirs(os.path.dirname(d_file), exist_ok=True)
-                                    shutil.copy2(s_file, d_file)
-                                    restored_count += 1
-                                    # Interrupt iteration safely layout parameter
-                                    break
-                                except Exception as e:
-                                    # Verify explicit ignore directive state properties
-                                    if skip_all_errors:
-                                        # Force loop logic exit parameter map
-                                        break
-                                    ans = self.prompt_copy_error_dialog(s_file, str(e))
-                                    # Test discrete conditional fallback execution route
-                                    if ans == "Skip":
-                                        # Bypass execution layout node instruction
-                                        break
-                                    elif ans == "SkipAll":
-                                        skip_all_errors = True
-                                        # Break internal evaluation state mapping
-                                        break
-                                    elif ans == "Abort":
-                                        progress_dialog.close()
-                                        QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
-                                        # Halt thread return command path property
-                                        return
-                            processed_count += 1
-                            progress_dialog.setValue(processed_count)
-                else:
-                    # Detect cancellation property state loop map
-                    if progress_dialog.wasCanceled():
-                        QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
-                        # Abort operation function branch route instruction
-                        return
-
-                    progress_dialog.setLabelText(f"Restoring: {os.path.basename(src)}")
-                    QApplication.processEvents()
-
-                    # Confirm object conflict path map parameters
-                    if os.path.exists(dest) and not overwrite_all:
-                        ans = self.prompt_overwrite_confirmation_dialog(dest)
-                        # Route evaluation mapping configuration node
-                        if ans == QMessageBox.StandardButton.YesToAll: 
-                            overwrite_all = True
-                        elif ans == QMessageBox.StandardButton.Cancel: 
-                            progress_dialog.close()
-                            # Release payload execution return instruction parameter
-                            return
-                        elif ans == QMessageBox.StandardButton.No: 
-                            processed_count += 1
-                            progress_dialog.setValue(processed_count)
-                            # Shift operational iteration step constraint command
-                            continue
-
-                    # Safe handling logic layout retry properties map
-                    while True:
-                        try:
-                            os.makedirs(os.path.dirname(dest), exist_ok=True)
-                            shutil.copy2(src, dest)
-                            restored_count += 1
-                            # Break cycle path parameter loop constraint
-                            break
-                        except Exception as e:
-                            # Implement exception bypass layout route instruction
-                            if skip_all_errors:
-                                # Stop cycle logic execution mapping state
-                                break
-                            ans = self.prompt_copy_error_dialog(src, str(e))
-                            # Follow fallback node constraints operation layout
-                            if ans == "Skip":
-                                # Abort evaluation sequence loop path mapping
-                                break
-                            elif ans == "SkipAll":
-                                skip_all_errors = True
-                                # Stop exception sequence propagation parameter route
-                                break
-                            elif ans == "Abort":
-                                progress_dialog.close()
-                                QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
-                                # Leave functional map execution layer property constraint
-                                return
-                                
-                    processed_count += 1
-                    progress_dialog.setValue(processed_count)
-        
-        progress_dialog.close()
-        dest_display = user_paste_path if user_paste_path else "original RootPath location(s)"
-        QMessageBox.information(
-            self, "Restore Successful", 
-            f"Paste operation finished.\nSuccessfully restored {restored_count} components into:\n{dest_display}"
-        )
-
-    """
-    /*
-     * SSH / SFTP remote restoration routine.
-     */
-    """
-    def execute_ssh_paste(self, ip, username, password, default_remote_path, port=None, key_filename=None):
-        total_files = 0
-        for rec in self.selected_records_data:
-            for rel in rec.get("RelativePathList", []):
-                src = os.path.join(rec["_folder"], rel)
-                if os.path.isdir(src):
-                    for dirpath, _, filenames in os.walk(src):
-                        total_files += len(filenames)
-                elif os.path.exists(src):
-                    total_files += 1
-
-        if total_files == 0:
-            total_files = 1
-
-        progress_dialog = QProgressDialog(f"Connecting to SSH ({username or ''}@{ip})...", "Cancel", 0, total_files, self)
-        progress_dialog.setWindowTitle("Paste Progress (SSH)")
-        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setValue(0)
-
-        for label in progress_dialog.findChildren(QLabel):
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        QApplication.processEvents()
-
-        ssh_target = f"{username}@{ip}" if username else ip
-
-        # If no password provided (e.g. coder.coffee-opera, SSH keys, SSH agent):
-        if not password:
-            progress_dialog.setLabelText(f"Connecting via OpenSSH to {ssh_target}...")
-            QApplication.processEvents()
-            check_res = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ssh_target, "echo ready"],
-                capture_output=True, text=True
+            self.execute_ssh_paste(
+                ip=conn["ip"],
+                username=conn.get("username", "") or target_info["username"] or "",
+                password=conn.get("password", ""),
+                default_remote_path=target_info["remote_path"],
+                port=conn.get("port"),
+                key_filename=conn.get("key_filename")
             )
-            if check_res.returncode == 0:
-                self._execute_scp_paste(ssh_target, default_remote_path, progress_dialog)
-                return
-
-        # Parse port if specified (e.g. host:2222)
-        conn_port = port if port else 22
-        host_to_connect = ip
-        if ":" in ip and not ip.startswith("["):
-            try:
-                parts = ip.split(":")
-                host_to_connect = parts[0]
-                conn_port = int(parts[1])
-            except Exception:
-                pass
-
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            ssh_client.connect(
-                hostname=host_to_connect,
-                port=conn_port,
-                username=username if username else None,
-                password=password if password else None,
-                key_filename=key_filename if key_filename else None,
-                timeout=12,
-                allow_agent=True,
-                look_for_keys=True
-            )
-            sftp = ssh_client.open_sftp()
-        except Exception as e:
-            progress_dialog.close()
-            QMessageBox.critical(self, "SSH Connection Error", f"Failed to connect to {username}@{ip}:\n{str(e)}")
             return
-
-        def sftp_makedirs(remote_directory):
-            parts = []
-            p = remote_directory.replace("\\", "/")
-            while p and p not in ("/", "."):
-                parts.append(p)
-                parent, _ = posixpath.split(p)
-                if parent == p:
-                    break
-                p = parent
-            parts.reverse()
-            for directory in parts:
-                try:
-                    sftp.stat(directory)
-                except (IOError, FileNotFoundError):
-                    try:
-                        sftp.mkdir(directory)
-                    except (IOError, FileNotFoundError):
-                        pass
-
-        def sftp_exists(remote_path):
-            try:
-                sftp.stat(remote_path.replace("\\", "/"))
-                return True
-            except (IOError, FileNotFoundError):
-                return False
-
-        # Resolve ~ if present in default_remote_path
-        resolved_default_path = default_remote_path.replace("\\", "/") if default_remote_path else ""
-        if resolved_default_path and (resolved_default_path.startswith("~") or resolved_default_path == "~"):
-            try:
-                remote_home = sftp.normalize(".")
-                if resolved_default_path == "~":
-                    resolved_default_path = remote_home
-                else:
-                    resolved_default_path = posixpath.join(remote_home, resolved_default_path[2:])
-            except Exception:
-                pass
-
-        skip_all_errors = False
-        overwrite_all = False
-        restored_count = 0
-        processed_count = 0
-
-        for rec in self.selected_records_data:
-            current_remote_base = resolved_default_path
-            if not current_remote_base:
-                rec_root = rec.get("RootPath", "").replace("\\", "/")
-                if rec_root.startswith("~") or rec_root == "~":
-                    try:
-                        remote_home = sftp.normalize(".")
-                        rec_root = remote_home if rec_root == "~" else posixpath.join(remote_home, rec_root[2:])
-                    except Exception:
-                        pass
-                current_remote_base = rec_root
-                if not current_remote_base:
-                    continue
-
-            sftp_makedirs(current_remote_base)
-            record_folder = rec["_folder"]
-
-            for rel in rec.get("RelativePathList", []):
-                src = os.path.join(record_folder, rel)
-                if not os.path.exists(src):
-                    continue
-
-                rel_posix = rel.replace("\\", "/").lstrip("/")
-                dest_remote = posixpath.join(current_remote_base, rel_posix)
-
-                if os.path.isdir(src):
-                    for dirpath, _, filenames in os.walk(src):
-                        for fname in filenames:
-                            if progress_dialog.wasCanceled():
-                                sftp.close()
-                                ssh_client.close()
-                                QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
-                                return
-
-                            s_file = os.path.join(dirpath, fname)
-                            rel_to_src = os.path.relpath(s_file, src).replace("\\", "/").lstrip("/")
-                            d_remote_file = posixpath.join(dest_remote, rel_to_src)
-
-                            progress_dialog.setLabelText(f"Restoring to {ip}: {fname}")
-                            QApplication.processEvents()
-
-                            if sftp_exists(d_remote_file) and not overwrite_all:
-                                ans = self.prompt_overwrite_confirmation_dialog(f"{username}@{ip}:{d_remote_file}")
-                                if ans == QMessageBox.StandardButton.YesToAll:
-                                    overwrite_all = True
-                                elif ans == QMessageBox.StandardButton.Cancel:
-                                    progress_dialog.close()
-                                    sftp.close()
-                                    ssh_client.close()
-                                    return
-                                elif ans == QMessageBox.StandardButton.No:
-                                    processed_count += 1
-                                    progress_dialog.setValue(processed_count)
-                                    continue
-
-                            while True:
-                                try:
-                                    sftp_makedirs(posixpath.dirname(d_remote_file))
-                                    sftp.put(s_file, d_remote_file)
-                                    restored_count += 1
-                                    break
-                                except Exception as e:
-                                    if skip_all_errors:
-                                        break
-                                    ans = self.prompt_copy_error_dialog(f"{s_file} -> {ip}:{d_remote_file}", str(e))
-                                    if ans == "Skip":
-                                        break
-                                    elif ans == "SkipAll":
-                                        skip_all_errors = True
-                                        break
-                                    elif ans == "Abort":
-                                        progress_dialog.close()
-                                        sftp.close()
-                                        ssh_client.close()
-                                        QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
-                                        return
-
-                            processed_count += 1
-                            progress_dialog.setValue(processed_count)
-                else:
-                    if progress_dialog.wasCanceled():
-                        sftp.close()
-                        ssh_client.close()
-                        QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
-                        return
-
-                    fname = os.path.basename(src)
-                    progress_dialog.setLabelText(f"Restoring to {ip}: {fname}")
-                    QApplication.processEvents()
-
-                    if sftp_exists(dest_remote) and not overwrite_all:
-                        ans = self.prompt_overwrite_confirmation_dialog(f"{username}@{ip}:{dest_remote}")
-                        if ans == QMessageBox.StandardButton.YesToAll:
-                            overwrite_all = True
-                        elif ans == QMessageBox.StandardButton.Cancel:
-                            progress_dialog.close()
-                            sftp.close()
-                            ssh_client.close()
-                            return
-                        elif ans == QMessageBox.StandardButton.No:
-                            processed_count += 1
-                            progress_dialog.setValue(processed_count)
-                            continue
-
-                    while True:
-                        try:
-                            sftp_makedirs(posixpath.dirname(dest_remote))
-                            sftp.put(src, dest_remote)
-                            restored_count += 1
-                            break
-                        except Exception as e:
-                            if skip_all_errors:
-                                break
-                            ans = self.prompt_copy_error_dialog(f"{src} -> {ip}:{dest_remote}", str(e))
-                            if ans == "Skip":
-                                break
-                            elif ans == "SkipAll":
-                                skip_all_errors = True
-                                break
-                            elif ans == "Abort":
-                                progress_dialog.close()
-                                sftp.close()
-                                ssh_client.close()
-                                QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
-                                return
-
-                    processed_count += 1
-                    progress_dialog.setValue(processed_count)
-
-        progress_dialog.close()
-        try:
-            sftp.close()
-            ssh_client.close()
-        except Exception:
-            pass
-
-        target_display = f"{username}@{ip}:{resolved_default_path}" if resolved_default_path else f"{username}@{ip}"
-        QMessageBox.information(
-            self, "Restore Successful",
-            f"Paste operation finished via SSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
-        )
-
-    def _execute_scp_paste(self, ssh_target, default_remote_path, progress_dialog):
-        restored_count = 0
-        processed_count = 0
-        remote_base = default_remote_path.replace("\\", "/") if default_remote_path else ""
-
-        for rec in self.selected_records_data:
-            current_remote_base = remote_base
-            if not current_remote_base:
-                rec_root = rec.get("RootPath", "").replace("\\", "/")
-                current_remote_base = rec_root
-                if not current_remote_base:
-                    continue
-
-            # Ensure remote base directory exists
-            subprocess.run(["ssh", ssh_target, f"mkdir -p {current_remote_base}"], capture_output=True)
-            record_folder = rec["_folder"]
-
-            for rel in rec.get("RelativePathList", []):
-                src = os.path.join(record_folder, rel)
-                if not os.path.exists(src):
-                    continue
-
-                rel_posix = rel.replace("\\", "/").lstrip("/")
-                dest_remote = posixpath.join(current_remote_base, rel_posix)
-
-                if progress_dialog.wasCanceled():
-                    progress_dialog.close()
-                    QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
+        else:
+            if dest_to_check and not os.path.exists(dest_to_check):
+                # Destination path not found locally (.6.) -> open SSH Connection Dialog
+                dlg = SSHConnectionDialog(
+                    self,
+                    default_ip="",
+                    default_username="",
+                    default_password="",
+                    save_default=True
+                )
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    conn = dlg.get_connection_info()
+                    self.execute_ssh_paste(
+                        ip=conn["ip"],
+                        username=conn.get("username", ""),
+                        password=conn.get("password", ""),
+                        default_remote_path=dest_to_check,
+                        port=conn.get("port"),
+                        key_filename=conn.get("key_filename")
+                    )
+                    return
+                # If user cancelled SSH setup, ask if they want to create the local folder
+                reply = QMessageBox.question(
+                    self,
+                    "Destination Not Found",
+                    f"Local path does not exist:\n{dest_to_check}\n\nDo you want to create this local directory and paste here?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
                     return
 
-                fname = os.path.basename(src)
-                progress_dialog.setLabelText(f"Restoring to {ssh_target}: {fname}")
-                QApplication.processEvents()
+            self.execute_local_paste(dest_to_check)
+            return
 
-                # Ensure remote parent directory exists
-                parent_remote = posixpath.dirname(dest_remote)
-                if parent_remote:
-                    subprocess.run(["ssh", ssh_target, f"mkdir -p {parent_remote}"], capture_output=True)
+    """
+    /*
+     * Asynchronous restoration routine (Local and SSH) to prevent UI freezing.
+     */
+    """
+    def start_restore_worker(self, is_ssh, ssh_conn=None, target_remote_path="", user_paste_path=""):
+        self.paste_progress_dialog = QProgressDialog("Preparing paste operation...", "Cancel", 0, 100, self)
+        self.paste_progress_dialog.setWindowTitle("Paste Progress")
+        self.paste_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.paste_progress_dialog.setMinimumDuration(0)
+        self.paste_progress_dialog.setValue(0)
 
-                scp_cmd = ["scp", "-r", src, f"{ssh_target}:{dest_remote}"]
-                res = subprocess.run(scp_cmd, capture_output=True, text=True)
-                if res.returncode == 0:
-                    restored_count += 1
-                else:
-                    ans = self.prompt_copy_error_dialog(f"{src} -> {ssh_target}:{dest_remote}", res.stderr)
-                    if ans == "Abort":
-                        progress_dialog.close()
-                        QMessageBox.warning(self, "Aborted", "Paste operation aborted due to error.")
-                        return
+        for label in self.paste_progress_dialog.findChildren(QLabel):
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-                processed_count += 1
-                progress_dialog.setValue(processed_count)
-
-        progress_dialog.close()
-        target_display = f"{ssh_target}:{remote_base}" if remote_base else ssh_target
-        QMessageBox.information(
-            self, "Restore Successful",
-            f"Paste operation finished via OpenSSH.\nSuccessfully restored {restored_count} components into:\n{target_display}"
+        self.restore_worker = RestoreWorker(
+            selected_records_data=self.selected_records_data,
+            is_ssh=is_ssh,
+            ssh_conn=ssh_conn,
+            target_remote_path=target_remote_path,
+            user_paste_path=user_paste_path
         )
+        self.restore_worker.progress.connect(self.on_restore_progress)
+        self.restore_worker.ask_overwrite.connect(self.on_restore_ask_overwrite)
+        self.restore_worker.ask_error.connect(self.on_restore_ask_error)
+        self.restore_worker.finished.connect(self.on_restore_finished)
+        self.paste_progress_dialog.canceled.connect(self.restore_worker.cancel)
 
+        self.restore_worker.start()
+        self.paste_progress_dialog.show()
 
+    def on_restore_progress(self, percent, msg):
+        if hasattr(self, "paste_progress_dialog") and self.paste_progress_dialog:
+            self.paste_progress_dialog.setValue(percent)
+            self.paste_progress_dialog.setLabelText(msg)
+
+    def on_restore_ask_overwrite(self, filepath):
+        ans = self.prompt_overwrite_confirmation_dialog(filepath)
+        if ans == QMessageBox.StandardButton.YesToAll:
+            self.restore_worker.set_user_action("YesToAll")
+        elif ans == QMessageBox.StandardButton.Yes:
+            self.restore_worker.set_user_action("Yes")
+        elif ans == QMessageBox.StandardButton.No:
+            self.restore_worker.set_user_action("No")
+        else:
+            self.restore_worker.set_user_action("Cancel")
+
+    def on_restore_ask_error(self, filepath, error_msg):
+        ans = self.prompt_copy_error_dialog(filepath, error_msg)
+        if ans == "SkipAll":
+            self.restore_worker.set_user_action("SkipAll")
+        elif ans == "Ignore":
+            self.restore_worker.set_user_action("Skip")
+        elif ans == "Abort":
+            self.restore_worker.set_user_action("Abort")
+        else:
+            self.restore_worker.set_user_action("Retry")
+
+    def on_restore_finished(self, success, message):
+        if hasattr(self, "paste_progress_dialog") and self.paste_progress_dialog:
+            self.paste_progress_dialog.close()
+
+        if success:
+            QMessageBox.information(self, "Restore Successful", message)
+        else:
+            if "Cancelled by user" in message:
+                QMessageBox.warning(self, "Cancelled", "Paste operation cancelled by user.")
+            elif "SSH Connection Failed" in message:
+                reply = QMessageBox.question(
+                    self,
+                    "SSH Connection Failed",
+                    f"{message}\n\nWould you like to configure/update the SSH connection?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.trigger_ssh_setup_dialog()
+            else:
+                QMessageBox.warning(self, "Paste Completed with Warnings", message)
+
+    def execute_local_paste(self, user_paste_path):
+        self.start_restore_worker(is_ssh=False, user_paste_path=user_paste_path)
+
+    def execute_ssh_paste(self, ip, username, password, default_remote_path, port=None, key_filename=None):
+        conn = {
+            "ip": ip,
+            "username": username,
+            "password": password,
+            "port": port,
+            "key_filename": key_filename
+        }
+        self.start_restore_worker(is_ssh=True, ssh_conn=conn, target_remote_path=default_remote_path)
 
     """
     /*

@@ -209,14 +209,31 @@ jobs:
           VERSION=$(python3 Stasher/AppUI/get_version.py)
           echo "RELEASE_VERSION=v$VERSION" >> $GITHUB_ENV
 
+      - name: Delete existing release if version unchanged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_VERSION }}"
+          echo "Checking if release exists for tag: $TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists (version unchanged). Deleting existing release..."
+            gh release delete "$TAG" --yes --cleanup-tag || gh release delete "$TAG" --yes
+            git push origin ":refs/tags/$TAG" 2>/dev/null || true
+            echo "Successfully deleted existing release and tag $TAG."
+          else
+            echo "Release $TAG does not exist yet. Proceeding with new release creation."
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_VERSION }}
+          target_commitish: ${{ github.sha }}
           name: Stasher ${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_VERSION }}
           draft: false
           prerelease: false
           generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             release_assets/stasher.exe
             release_assets/stasher.AppImage
