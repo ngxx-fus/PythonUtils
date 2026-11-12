@@ -48,7 +48,7 @@ jobs:
       - name: Extract version from stasher_version.yml
         shell: pwsh
         run: |
-          $ver = python -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')"
+          $ver = python Stasher/AppUI/get_version.py
           echo "VERSION=$ver" >> $env:GITHUB_ENV
           Write-Host "Stasher Version: $ver"
 
@@ -107,7 +107,7 @@ jobs:
 
       - name: Extract version from stasher_version.yml
         run: |
-          VERSION=$(python3 -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')")
+          VERSION=$(python3 Stasher/AppUI/get_version.py)
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Stasher Version: $VERSION"
 
@@ -202,7 +202,7 @@ jobs:
       - name: Extract version
         run: |
           pip install PyYAML
-          VERSION=$(python3 -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')")
+          VERSION=$(python3 Stasher/AppUI/get_version.py)
           echo "RELEASE_VERSION=v$VERSION" >> $GITHUB_ENV
 
       - name: Create Release
