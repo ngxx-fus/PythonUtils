@@ -1,0 +1,218 @@
+name: Stasher CI/CD Build (Windows & Linux)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish GitHub Release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ====================================================
+  # Job 1: Build Windows (stasher.exe)
+  # ====================================================
+  build-windows:
+    name: Build Windows (stasher.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r Stasher/AppUI/requirements.txt pyinstaller PyYAML pillow
+
+      - name: Extract version from stasher_version.yml
+        shell: pwsh
+        run: |
+          $ver = python -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')"
+          echo "VERSION=$ver" >> $env:GITHUB_ENV
+          Write-Host "Stasher Version: $ver"
+
+      - name: Build standalone stasher.exe
+        shell: pwsh
+        working-directory: Stasher/AppUI
+        run: |
+          $env:PYTHONPATH = "."
+          pyinstaller --clean --noconfirm --onefile --windowed --icon="stasher.ico" --name "stasher" stasher_main.py
+
+      - name: Verify build artifact
+        shell: pwsh
+        run: |
+          if (Test-Path "Stasher/AppUI/dist/stasher.exe") {
+            $item = Get-Item "Stasher/AppUI/dist/stasher.exe"
+            Write-Host "Build Succeeded: $($item.FullName) ($([math]::Round($item.Length / 1MB, 2)) MB)"
+          } else {
+            Write-Error "Error: stasher.exe not generated!"
+            exit 1
+          }
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stasher-windows-x64
+          path: Stasher/AppUI/dist/stasher.exe
+          if-no-files-found: error
+
+  # ====================================================
+  # Job 2: Build Linux AppImage (VoidLinux / Ubuntu / Debian / Fedora)
+  # ====================================================
+  build-linux:
+    name: Build Linux (stasher.AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxkbcommon-x11-0 wget desktop-file-utils zsync file
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r Stasher/AppUI/requirements.txt pyinstaller PyYAML pillow
+
+      - name: Extract version from stasher_version.yml
+        run: |
+          VERSION=$(python3 -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Stasher Version: $VERSION"
+
+      - name: Build standalone binaries with PyInstaller
+        working-directory: Stasher/AppUI
+        run: |
+          export PYTHONPATH="."
+          pyinstaller --clean --noconfirm --onedir --windowed --name "stasher" stasher_main.py
+
+      - name: Package stasher.AppImage
+        working-directory: Stasher/AppUI
+        run: |
+          # 1. Create AppDir directory structure
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/applications
+
+          # 2. Copy PyInstaller onedir distribution into AppDir/usr/bin
+          cp -r dist/stasher/* AppDir/usr/bin/
+
+          # 3. Create desktop entry file
+          cat << 'EOF' > AppDir/stasher.desktop
+          [Desktop Entry]
+          Name=Stasher
+          Comment=File and folder stasher utility
+          Exec=stasher
+          Icon=stasher
+          Type=Application
+          Categories=Utility;FileTools;
+          Terminal=false
+          EOF
+          cp AppDir/stasher.desktop AppDir/usr/share/applications/stasher.desktop
+
+          # 4. Copy app icon
+          if [ -f "stasher.png" ]; then
+            cp stasher.png AppDir/stasher.png
+            cp stasher.png AppDir/usr/share/icons/hicolor/256x256/apps/stasher.png
+          fi
+
+          # 5. Create AppRun launcher
+          cat << 'EOF' > AppDir/AppRun
+          #!/bin/sh
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin:${PATH}"
+          export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"
+          exec "${HERE}/usr/bin/stasher" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          # 6. Download appimagetool and package without requiring FUSE
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract
+          ARCH=x86_64 ./squashfs-root/AppRun AppDir stasher.AppImage
+          chmod +x stasher.AppImage
+
+          ls -lh stasher.AppImage
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stasher-linux-x86_64
+          path: Stasher/AppUI/stasher.AppImage
+          if-no-files-found: error
+
+  # ====================================================
+  # Job 3: Publish GitHub Release (on Tag push or Manual Dispatch)
+  # ====================================================
+  release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create release directory
+        run: mkdir -p release_assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: stasher-windows-x64
+          path: release_assets/
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: stasher-linux-x86_64
+          path: release_assets/
+
+      - name: Extract version
+        run: |
+          pip install PyYAML
+          VERSION=$(python3 -c "import yaml; v = yaml.safe_load(open('Stasher/AppUI/stasher_version.yml'))['stasher']; print(f'{v[\"release\"]}.{v[\"major_update\"]}.{v[\"minor_update\"]}')")
+          echo "RELEASE_VERSION=v$VERSION" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_VERSION }}
+          name: Stasher ${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release_assets/stasher.exe
+            release_assets/stasher.AppImage

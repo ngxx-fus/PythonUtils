@@ -1,0 +1,4 @@
+stasher:
+  release: 1
+  major_update: 3 
+  minor_update: 0

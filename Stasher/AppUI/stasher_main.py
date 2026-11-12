@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QCheckBox
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QAction, QPalette
+from PySide6.QtGui import QColor, QAction, QPalette, QIcon
 
 # Import UI classes compiled from the respective .ui files
 from stasher_ui import Ui_StasherMain
@@ -1032,6 +1032,12 @@ class StasherApp(QMainWindow, Ui_StasherMain):
     def __init__(self):
         super().__init__()
         self.setupUi(self)
+
+        # Set Window Icon if available
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, "stasher.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.config = load_config()
         self.storage_path = self.config.get("PATH_STORAGE", DEFAULT_STORAGE)
